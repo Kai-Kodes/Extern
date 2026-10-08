@@ -72,7 +72,8 @@ class KeyReader:
             if not line:
                 raise EOFError()
             raw = line.strip()
-            # Map test names or sequences to Key constants
+            if line in (" \n", " ") or raw == "space":
+                return Key.SPACE
             if raw in ("up", "\x1b[A", "\x1bOA"):
                 return Key.UP
             elif raw in ("down", "\x1b[B", "\x1bOB"):

@@ -85,42 +85,36 @@ class UniversalView:
                 continue
 
             if k in ("+", Key.PLUS, "add"):
-                new_msg = self.handle_create_universal_task()
-                if new_msg:
-                    status_msg = new_msg
-                    status_style = "green"
+                err_msg = self.handle_create_universal_task()
+                if err_msg:
+                    status_msg = err_msg
+                    status_style = "red"
                 continue
 
             if k in ("d", "delete") and tasks:
-                del_msg = self.handle_delete_universal_task(tasks, current_idx=selected_idx)
-                if del_msg:
-                    status_msg = del_msg
-                    status_style = "yellow"
+                del_err = self.handle_delete_universal_task(tasks, current_idx=selected_idx)
+                if del_err:
+                    status_msg = del_err
+                    status_style = "red"
                 continue
 
             if (k in (Key.ENTER, "enter")) and tasks:
                 selected_task = tasks[selected_idx]
                 today_str = datetime.now().date().isoformat()
-                _, is_new = self.daily_service.add_task_to_date(
+                self.daily_service.add_task_to_date(
                     selected_task.id, today_str
                 )
-                if is_new:
-                    return f'Added "{selected_task.title}" to today\'s tasks!'
-                else:
-                    return f'"{selected_task.title}" is already scheduled for today!'
+                return None
 
             if k.isdigit() and tasks:
                 idx = int(k)
                 if 1 <= idx <= len(tasks):
                     selected_task = tasks[idx - 1]
                     today_str = datetime.now().date().isoformat()
-                    _, is_new = self.daily_service.add_task_to_date(
+                    self.daily_service.add_task_to_date(
                         selected_task.id, today_str
                     )
-                    if is_new:
-                        return f'Added "{selected_task.title}" to today\'s tasks!'
-                    else:
-                        return f'"{selected_task.title}" is already scheduled for today!'
+                    return None
                 else:
                     status_msg = f"Invalid selection: #{k}."
                     status_style = "red"
@@ -139,7 +133,7 @@ class UniversalView:
             source_type="universal",
             status="pending",
         )
-        return f'Created universal task: "{title}"'
+        return None
 
     def handle_delete_universal_task(
         self, tasks: list[Task], current_idx: int = 0
@@ -197,5 +191,5 @@ class UniversalView:
         k_conf = key_reader.read_key()
         if k_conf.lower() in ("y", "yes", Key.ENTER, "enter"):
             self.task_service.delete_task(selected_task.id)
-            return f'Deleted universal task "{selected_task.title}".'
-        return "Deletion cancelled."
+            return None
+        return None

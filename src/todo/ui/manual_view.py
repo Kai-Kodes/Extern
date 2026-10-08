@@ -88,12 +88,12 @@ class ManualView:
             )
             today_str = datetime.now().date().isoformat()
             self.daily_service.add_task_to_date(task.id, today_str)
-            return f'Added "{task.title}" to today\'s tasks!'
+            return None
         else:
-            task = self.task_service.create_task(
+            self.task_service.create_task(
                 title=task_title,
                 source_type="universal",
                 status="pending",
             )
-            return f'Added "{task.title}" to universal task list!'
+            return None
 

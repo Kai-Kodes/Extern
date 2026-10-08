@@ -112,6 +112,10 @@ class TodoApp:
                     self.universal_view.run(select_mode=True)
                     continue
 
+                if choice.lower() in ("f", "filemeta"):
+                    self.filemeta_view.run()
+                    continue
+
                 if choice.isdigit() and tasks:
                     idx = int(choice)
                     if 1 <= idx <= len(tasks):
@@ -154,19 +158,16 @@ class TodoApp:
                 choice = str(selected_idx + 1)
 
             if choice == "1":
-                result = self.filemeta_view.run()
-                if result:
-                    return result
+                self.filemeta_view.run()
+                return None
 
             elif choice == "2":
-                result = self.universal_view.run(select_mode=True)
-                if result:
-                    return result
+                self.universal_view.run(select_mode=True)
+                return None
 
             elif choice == "3":
-                result = self.manual_view.run()
-                if result:
-                    return result
+                self.manual_view.run()
+                return None
 
             else:
                 add_status = "Invalid option. Please choose 1, 2, 3, or 'b' to go back."
