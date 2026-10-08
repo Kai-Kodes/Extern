@@ -98,18 +98,18 @@ class TodoApp:
                     continue
 
                 if choice in ("+", Key.PLUS, "add"):
-                    status_msg = self.handle_add_task_menu()
+                    self.handle_add_task_menu()
                     continue
 
                 if choice.lower() in ("d", "delete"):
-                    del_msg = self.today_view.handle_delete(tasks, current_idx=selected_idx)
-                    if del_msg:
-                        status_msg = del_msg
-                        status_style = "yellow"
+                    del_err = self.today_view.handle_delete(tasks, current_idx=selected_idx)
+                    if del_err:
+                        status_msg = del_err
+                        status_style = "red"
                     continue
 
                 if choice.lower() in ("u", "universal"):
-                    status_msg = self.universal_view.run(select_mode=True)
+                    self.universal_view.run(select_mode=True)
                     continue
 
                 if choice.isdigit() and tasks:
@@ -121,10 +121,7 @@ class TodoApp:
                     else:
                         status_msg = f"Invalid selection: #{choice}. Please enter 1-{len(tasks)}."
                         status_style = "red"
-                else:
-                    if choice:
-                        status_msg = "Unknown option. Use [↑/↓] to navigate, [Enter] to toggle, '+' to add, 'd' to delete, or 'q' to quit."
-                        status_style = "yellow"
+                    continue
 
             except (KeyboardInterrupt, EOFError):
                 break

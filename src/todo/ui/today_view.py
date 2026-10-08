@@ -67,7 +67,7 @@ class TodayView:
 
                 if dt.is_completed:
                     icon = Text("✓", style="bold green")
-                    title = Text(task_title, style="dim strike")
+                    title = Text(task_title, style="green")
                 else:
                     icon = Text("○", style="bright_yellow")
                     title = Text(task_title, style="bold white")
@@ -92,7 +92,7 @@ class TodayView:
     ) -> Optional[str]:
         """Selection-based task deletion workflow respecting task semantics."""
         if not tasks:
-            return "No tasks to delete."
+            return None
 
         del_idx = current_idx
         while True:
@@ -154,8 +154,10 @@ class TodayView:
 
             sub_k = key_reader.read_key()
             if sub_k == "1":
-                self.daily_service.remove_daily_task(selected_dt.id)
-                return f'Removed "{title}" from today\'s schedule.'
+                ok = self.daily_service.remove_daily_task(selected_dt.id)
+                if not ok:
+                    return "Unable to remove task from today's schedule."
+                return None
             elif sub_k == "2":
                 clear_viewport()
                 render_header("CONFIRM PERMANENT DELETE", subtitle=title)
@@ -166,13 +168,15 @@ class TodayView:
                 conf = key_reader.read_key()
                 if conf.lower() in ("y", "yes", Key.ENTER):
                     if self.task_service:
-                        self.task_service.delete_task(task.id)
+                        ok = self.task_service.delete_task(task.id)
                     else:
-                        self.daily_service.delete_daily_task_and_underlying(
+                        ok = self.daily_service.delete_daily_task_and_underlying(
                             selected_dt.id
                         )
-                    return f'Permanently deleted "{title}".'
-                return "Deletion cancelled."
+                    if not ok:
+                        return "Unable to delete universal task."
+                    return None
+                return None
             return None
 
         # 2. Filemeta task deletion semantics
@@ -188,9 +192,11 @@ class TodayView:
             render_footer([("y", "Yes, remove"), ("n", "Cancel")])
             conf = key_reader.read_key()
             if conf.lower() in ("y", "yes", Key.ENTER):
-                self.daily_service.remove_daily_task(selected_dt.id)
-                return f'Removed "{title}" from today\'s schedule.'
-            return "Cancelled."
+                ok = self.daily_service.remove_daily_task(selected_dt.id)
+                if not ok:
+                    return "Unable to remove task from today's schedule."
+                return None
+            return None
 
         # 3. Manual task deletion semantics
         else:
@@ -202,6 +208,8 @@ class TodayView:
             render_footer([("y", "Yes, delete"), ("n", "Cancel")])
             conf = key_reader.read_key()
             if conf.lower() in ("y", "yes", Key.ENTER):
-                self.daily_service.delete_daily_task_and_underlying(selected_dt.id)
-                return f'Deleted "{title}".'
-            return "Cancelled."
+                ok = self.daily_service.delete_daily_task_and_underlying(selected_dt.id)
+                if not ok:
+                    return "Unable to delete task."
+                return None
+            return None

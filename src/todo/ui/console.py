@@ -84,24 +84,17 @@ def calculate_today_progress(completed: int, total: int) -> int:
 
 
 def format_today_progress(
-    completed: int, total: int, avail_width: int, left_len: int = 18
+    completed: int, total: int, avail_width: int = 80, left_len: int = 18
 ) -> str:
     """
-    Format right-hand progress string adapting dynamically to available terminal width.
-    Full: '50% · 1/2 completed'
-    Done: '50% · 1/2 done'
-    Compact: '50% · 1/2'
-    Empty: '0% · 0/0'
+    Format right-hand progress string.
+    Contains ONLY 'percentage · completed_count/total_count'.
+    Examples: '0% · 0/0', '0% · 0/5', '25% · 1/4', '50% · 2/4', '100% · 4/4'.
+    No 'done', 'completed', 'complete', 'tasks', or 'finished'.
     """
     if total <= 0:
         return "0% · 0/0"
     pct = calculate_today_progress(completed, total)
-    full = f"{pct}% · {completed}/{total} completed"
-    if left_len + len(full) + 2 <= avail_width:
-        return full
-    done_lbl = f"{pct}% · {completed}/{total} done"
-    if left_len + len(done_lbl) + 2 <= avail_width:
-        return done_lbl
     return f"{pct}% · {completed}/{total}"
 
 

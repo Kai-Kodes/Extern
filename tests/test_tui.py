@@ -315,27 +315,35 @@ def test_progress_calculation():
 
 
 def test_format_today_progress_responsive():
-    """Verify dynamic label formatting adapting to terminal width."""
-    # Empty state
-    assert format_today_progress(0, 0, 80) == "0% · 0/0"
+    """Verify clean label formatting without 'done' or 'completed' words."""
+    assert format_today_progress(0, 0) == "0% · 0/0"
+    assert format_today_progress(0, 1) == "0% · 0/1"
+    assert format_today_progress(0, 5) == "0% · 0/5"
+    assert format_today_progress(1, 4) == "25% · 1/4"
+    assert format_today_progress(1, 2) == "50% · 1/2"
+    assert format_today_progress(2, 4) == "50% · 2/4"
+    assert format_today_progress(3, 4) == "75% · 3/4"
+    assert format_today_progress(3, 5) == "60% · 3/5"
+    assert format_today_progress(1, 1) == "100% · 1/1"
+    assert format_today_progress(4, 4) == "100% · 4/4"
 
-    # Wide terminal -> full label
-    assert format_today_progress(3, 4, 80, left_len=18) == "75% · 3/4 completed"
-
-    # Medium terminal -> done label
-    assert format_today_progress(3, 4, 38, left_len=18) == "75% · 3/4 done"
-
-    # Narrow terminal -> compact label
-    assert format_today_progress(3, 4, 30, left_len=18) == "75% · 3/4"
+    # Verify no 'done' or 'completed' anywhere
+    for c, t in [(0, 0), (0, 5), (1, 4), (2, 4), (3, 4), (4, 4)]:
+        res = format_today_progress(c, t)
+        assert "done" not in res
+        assert "completed" not in res
+        assert "tasks" not in res
 
 
 def test_today_header_rendering_layout():
-    """Verify horizontal layout: left date and right percentage/count."""
+    """Verify horizontal layout: left date and right clean percentage/count."""
     with console.capture() as capture:
         render_today_header("TODAY · 8 OCT 2026", completed=1, total=2)
     output = capture.get()
     assert "TODAY · 8 OCT 2026" in output
-    assert "50% · 1/2 completed" in output
+    assert "50% · 1/2" in output
+    assert "completed" not in output
+    assert "done" not in output
 
     # Empty state header
     with console.capture() as capture:
@@ -343,6 +351,8 @@ def test_today_header_rendering_layout():
     empty_output = capture.get()
     assert "TODAY · 8 OCT 2026" in empty_output
     assert "0% · 0/0" in empty_output
+    assert "completed" not in empty_output
+    assert "done" not in empty_output
 
 
 def test_toggle_task_no_status_banner_and_cursor_stable():
@@ -418,8 +428,76 @@ def test_toggle_filemeta_sync_and_progress_update():
         assert item_updated.completed is True
 
         # Ensure header reflected 100% and NO status message was printed
-        assert "100% · 1/1 completed" in out
+        assert "100% · 1/1" in out
+        assert "completed" not in out
         assert "Completed:" not in out
         assert "Marked pending:" not in out
+
+
+def test_completed_task_visual_styling_no_strikethrough():
+    """Verify completed tasks use green text and ✓, without strike-through or dimming."""
+    from todo.ui.today_view import TodayView
+    from todo.models import DailyTask, Task
+
+    mock_daily_svc = MagicMock()
+    view = TodayView(mock_daily_svc)
+
+    t1 = Task(id=1, title="Finished Assignment", status="completed")
+    t2 = Task(id=2, title="Pending Lesson", status="pending")
+    dt1 = DailyTask(id=1, task_id=1, date="2026-10-08", completed_at="2026-10-08T10:00:00", task=t1)
+    dt2 = DailyTask(id=2, task_id=2, date="2026-10-08", completed_at=None, task=t2)
+
+    with console.capture() as capture:
+        view.render([dt1, dt2], selected_idx=0, clear=False)
+    out = capture.get()
+
+    assert "Finished Assignment" in out
+    assert "Pending Lesson" in out
+    assert "✓" in out
+    assert "○" in out
+
+
+def test_today_delete_silent_feedback():
+    """Verify deleting a task produces NO status banner and updates progress immediately."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        cfg = Config(db_path=db_path)
+        app = TodoApp(cfg)
+
+        from datetime import datetime
+        today_str = datetime.now().date().isoformat()
+        t1 = app.task_service.create_task("Task to Delete", source_type="manual")
+        app.daily_service.add_task_to_date(t1.id, today_str)
+
+        # "d" (delete), "1" (select task 1), "y" (confirm delete), "q" (quit)
+        inputs = ["d\n", "1\n", "y\n", "q\n"]
+        with patch("sys.stdin", io.StringIO("".join(inputs))), console.capture() as capture:
+            app.run()
+        out = capture.get()
+
+        # Task removed
+        assert len(app.daily_service.get_tasks_for_date(today_str)) == 0
+        # No success banner displayed
+        assert "Removed" not in out
+        assert "Deleted" not in out
+        assert "Successfully deleted" not in out
+        assert "0% · 0/0" in out
+
+
+def test_unsupported_keys_silently_ignored():
+    """Verify unsupported keys (x, z, /, ?) are silently ignored with no 'Unknown option' banner."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        cfg = Config(db_path=db_path)
+        app = TodoApp(cfg)
+
+        inputs = ["x\n", "z\n", "/\n", "?\n", "q\n"]
+        with patch("sys.stdin", io.StringIO("".join(inputs))), console.capture() as capture:
+            app.run()
+        out = capture.get()
+
+        assert "Unknown option" not in out
+        assert "Unknown" not in out
+
 
 

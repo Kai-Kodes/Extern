@@ -103,5 +103,7 @@ def test_today_view_with_tasks_rendering():
         assert "Lesson 2" in output
         assert "✓" in output
         assert "○" in output
-        assert "50% · 1/2 completed" in output
+        assert "50% · 1/2" in output
+        assert "completed" not in output
+        assert "done" not in output
 

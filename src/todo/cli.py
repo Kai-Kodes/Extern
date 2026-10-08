@@ -50,7 +50,7 @@ def today_cmd() -> None:
         task_title = dt.task.title if dt.task else f"Task #{dt.task_id}"
         if dt.is_completed:
             icon = Text("✓", style="bold green")
-            title = Text(task_title, style="dim strike")
+            title = Text(task_title, style="green")
         else:
             icon = Text("○", style="bright_yellow")
             title = Text(task_title, style="bold white")
