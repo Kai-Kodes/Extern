@@ -12,6 +12,7 @@ from typing import List, Optional, Tuple
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from todo.ui.key_reader import Key, KeyReader, key_reader
@@ -73,6 +74,70 @@ def format_today_title(date_obj: Optional[datetime] = None) -> str:
     day = date_obj.strftime("%-d")
     month_year = date_obj.strftime("%b %Y").upper()
     return f"TODAY · {day} {month_year}"
+
+
+def calculate_today_progress(completed: int, total: int) -> int:
+    """Calculate integer completion percentage (0-100), avoiding division by zero."""
+    if total <= 0:
+        return 0
+    return round((completed / total) * 100)
+
+
+def format_today_progress(
+    completed: int, total: int, avail_width: int, left_len: int = 18
+) -> str:
+    """
+    Format right-hand progress string adapting dynamically to available terminal width.
+    Full: '50% · 1/2 completed'
+    Done: '50% · 1/2 done'
+    Compact: '50% · 1/2'
+    Empty: '0% · 0/0'
+    """
+    if total <= 0:
+        return "0% · 0/0"
+    pct = calculate_today_progress(completed, total)
+    full = f"{pct}% · {completed}/{total} completed"
+    if left_len + len(full) + 2 <= avail_width:
+        return full
+    done_lbl = f"{pct}% · {completed}/{total} done"
+    if left_len + len(done_lbl) + 2 <= avail_width:
+        return done_lbl
+    return f"{pct}% · {completed}/{total}"
+
+
+def render_today_header(
+    date_str: Optional[str] = None, completed: int = 0, total: int = 0
+) -> None:
+    """
+    Render horizontal Today header with date on the left and progress on the right.
+    Calculates left/right layout dynamically based on terminal width.
+    """
+    if date_str is None:
+        date_str = format_today_title()
+
+    term_width = console.width
+    avail_width = max(10, term_width - 4)
+
+    left_text = date_str.upper()
+    right_text = format_today_progress(completed, total, avail_width, len(left_text))
+
+    table = Table.grid(expand=True)
+    table.add_column(justify="left", no_wrap=True)
+    table.add_column(justify="right", no_wrap=True)
+    table.add_row(
+        Text(left_text, style="bold bright_white"),
+        Text(right_text, style="bold cyan"),
+    )
+
+    console.print(
+        Panel(
+            table,
+            box=box.ROUNDED,
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+
 
 
 def render_header(title: str, subtitle: Optional[str] = None) -> None:

@@ -94,13 +94,7 @@ class TodoApp:
                 if choice in (Key.ENTER, "enter"):
                     if tasks:
                         selected_daily = tasks[selected_idx]
-                        updated = self.daily_service.toggle_task_completion(selected_daily.id)
-                        if updated and updated.is_completed:
-                            status_msg = f'✓ Completed: "{updated.task.title}"'
-                            status_style = "green"
-                        elif updated:
-                            status_msg = f'○ Marked pending: "{updated.task.title}"'
-                            status_style = "yellow"
+                        self.daily_service.toggle_task_completion(selected_daily.id)
                     continue
 
                 if choice in ("+", Key.PLUS, "add"):
@@ -123,13 +117,7 @@ class TodoApp:
                     if 1 <= idx <= len(tasks):
                         selected_daily = tasks[idx - 1]
                         selected_idx = idx - 1
-                        updated = self.daily_service.toggle_task_completion(selected_daily.id)
-                        if updated and updated.is_completed:
-                            status_msg = f'✓ Completed: "{updated.task.title}"'
-                            status_style = "green"
-                        elif updated:
-                            status_msg = f'○ Marked pending: "{updated.task.title}"'
-                            status_style = "yellow"
+                        self.daily_service.toggle_task_completion(selected_daily.id)
                     else:
                         status_msg = f"Invalid selection: #{choice}. Please enter 1-{len(tasks)}."
                         status_style = "red"

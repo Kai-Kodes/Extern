@@ -15,6 +15,7 @@ from todo.ui.console import (
     print_status_message,
     render_footer,
     render_header,
+    render_today_header,
 )
 from todo.ui.key_reader import Key, key_reader
 
@@ -38,7 +39,9 @@ class TodayView:
         if clear:
             clear_viewport()
 
-        render_header(format_today_title())
+        total = len(tasks)
+        completed = sum(1 for dt in tasks if dt.is_completed)
+        render_today_header(format_today_title(), completed=completed, total=total)
 
         if status_msg:
             print_status_message(status_msg, style=status_style)

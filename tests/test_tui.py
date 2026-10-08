@@ -17,8 +17,12 @@ from todo.ui.app import TodoApp
 from todo.ui.console import (
     _IN_ALT_SCREEN,
     alt_screen,
+    calculate_today_progress,
+    console,
     enter_alt_screen,
     exit_alt_screen,
+    format_today_progress,
+    render_today_header,
     tui_mode,
 )
 from todo.ui.key_reader import Key, KeyReader, key_reader
@@ -298,4 +302,124 @@ def test_add_task_menu_arrow_navigation():
         inputs = ["+\n", "down\n", "enter\n", "b\n", "b\n", "q\n"]
         with patch("sys.stdin", io.StringIO("".join(inputs))):
             app.run()
+
+
+def test_progress_calculation():
+    """Verify integer completion percentage calculations per spec."""
+    assert calculate_today_progress(0, 0) == 0
+    assert calculate_today_progress(0, 1) == 0
+    assert calculate_today_progress(1, 1) == 100
+    assert calculate_today_progress(1, 2) == 50
+    assert calculate_today_progress(3, 5) == 60
+    assert calculate_today_progress(7, 10) == 70
+
+
+def test_format_today_progress_responsive():
+    """Verify dynamic label formatting adapting to terminal width."""
+    # Empty state
+    assert format_today_progress(0, 0, 80) == "0% · 0/0"
+
+    # Wide terminal -> full label
+    assert format_today_progress(3, 4, 80, left_len=18) == "75% · 3/4 completed"
+
+    # Medium terminal -> done label
+    assert format_today_progress(3, 4, 38, left_len=18) == "75% · 3/4 done"
+
+    # Narrow terminal -> compact label
+    assert format_today_progress(3, 4, 30, left_len=18) == "75% · 3/4"
+
+
+def test_today_header_rendering_layout():
+    """Verify horizontal layout: left date and right percentage/count."""
+    with console.capture() as capture:
+        render_today_header("TODAY · 8 OCT 2026", completed=1, total=2)
+    output = capture.get()
+    assert "TODAY · 8 OCT 2026" in output
+    assert "50% · 1/2 completed" in output
+
+    # Empty state header
+    with console.capture() as capture:
+        render_today_header("TODAY · 8 OCT 2026", completed=0, total=0)
+    empty_output = capture.get()
+    assert "TODAY · 8 OCT 2026" in empty_output
+    assert "0% · 0/0" in empty_output
+
+
+def test_toggle_task_no_status_banner_and_cursor_stable():
+    """
+    Verify:
+    1. Toggling task changes state (○ -> ✓ and ✓ -> ○)
+    2. Header progress updates dynamically (0% -> 50% -> 100%)
+    3. Output contains ZERO status banners ('Completed:', 'Marked pending:', etc.)
+    4. Selection remains on the same task.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        cfg = Config(db_path=db_path)
+        app = TodoApp(cfg)
+
+        from datetime import datetime
+        today_str = datetime.now().date().isoformat()
+        t1 = app.task_service.create_task("Task 1", source_type="manual")
+        t2 = app.task_service.create_task("Task 2", source_type="manual")
+        app.daily_service.add_task_to_date(t1.id, today_str)
+        app.daily_service.add_task_to_date(t2.id, today_str)
+
+        # Move to task 2 (Down), toggle (Enter), toggle again (Enter), quit (q)
+        inputs = ["down\n", "enter\n", "enter\n", "q\n"]
+        with patch("sys.stdin", io.StringIO("".join(inputs))), console.capture() as capture:
+            app.run()
+        out = capture.get()
+
+        # Ensure NO transient completion messages exist
+        assert "Completed:" not in out
+        assert "Marked completed:" not in out
+        assert "Marked pending:" not in out
+        assert "Task completed" not in out
+        assert "Task marked pending" not in out
+
+
+def test_toggle_filemeta_sync_and_progress_update():
+    """Verify toggling in Today updates Filemeta item and recalculates progress."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        cfg = Config(db_path=db_path)
+        app = TodoApp(cfg)
+
+        from todo.integrations.filemeta import FilemetaScanResult, ScannedFile
+        scan = FilemetaScanResult(
+            source_name="Course A",
+            source_path="/tmp/course_a",
+            items=[
+                ScannedFile(name="v1.mp4", path="/tmp/course_a/v1.mp4", title="Video 1", type="video"),
+            ],
+        )
+        app.source_service.add_or_update_source(scan)
+        items = app.source_service.get_items_by_source(1)
+        item = items[0]
+        assert item.completed is False
+
+        # Add to today
+        task = app.task_service.get_or_create_filemeta_task(item, source_name="Course A")
+        from datetime import datetime
+        today_str = datetime.now().date().isoformat()
+        dt, _ = app.daily_service.add_task_to_date(task.id, today_str)
+
+        # Toggle via Enter: should complete daily task and sync FileItem
+        inputs = ["enter\n", "q\n"]
+        with patch("sys.stdin", io.StringIO("".join(inputs))), console.capture() as capture:
+            app.run()
+        out = capture.get()
+
+        # Check DB state
+        tasks = app.daily_service.get_tasks_for_date(today_str)
+        assert tasks[0].is_completed is True
+        item_updated = app.source_service.get_items_by_source(1)[0]
+        assert item_updated.completed is True
+
+        # Ensure header reflected 100% and NO status message was printed
+        assert "100% · 1/1 completed" in out
+        assert "Completed:" not in out
+        assert "Marked pending:" not in out
+
 

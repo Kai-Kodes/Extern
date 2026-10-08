@@ -74,13 +74,14 @@ def test_today_view_empty_state_rendering():
         output = capture.get()
 
         assert "TODAY" in output
+        assert "0% · 0/0" in output
         assert "No tasks" in output
         assert "Add task" in output
         assert "Quit" in output
 
 
 def test_today_view_with_tasks_rendering():
-    """Verify task list view renders completed and pending icons."""
+    """Verify task list view renders completed and pending icons with progress in header."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")
         daily_svc = DailyService(db)
@@ -102,3 +103,5 @@ def test_today_view_with_tasks_rendering():
         assert "Lesson 2" in output
         assert "✓" in output
         assert "○" in output
+        assert "50% · 1/2 completed" in output
+
