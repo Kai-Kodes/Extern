@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "todo-cli"
+version = "0.1.0"
+description = "A local-first Todo CLI application with Filemeta integration"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "redsheronin" }
+]
+dependencies = [
+    "rich>=13.0.0",
+    "click>=8.0.0",
+]
+
+[project.scripts]
+todo = "todo.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
