@@ -114,7 +114,7 @@ def sources_cmd() -> None:
         return
 
     for idx, s in enumerate(sources, start=1):
-        count_lbl = f"{s.item_count} items" if s.item_count != 1 else "1 item"
+        count_lbl = f"{s.progress_pct}% ({s.completed_count}/{s.item_count} items)"
         console.print(f"  [bold cyan]{idx}.[/bold cyan] [bold white]{s.name}[/bold white] [dim]({count_lbl})[/dim]")
         console.print(f"     [dim]{s.path}[/dim]")
     console.print()

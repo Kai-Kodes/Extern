@@ -19,6 +19,7 @@ class SourceService:
         """
         Store or update a Filemeta source and its associated items.
         Handles duplicates by updating existing records rather than creating duplicates.
+        Completion state is preserved across rescans.
         Returns: (source, added_items_count, updated_items_count)
         """
         now = datetime.now().isoformat()
@@ -50,16 +51,17 @@ class SourceService:
                 source_id = cursor.lastrowid
                 created_at = now
 
-            # Upsert file items
+            # Upsert file items (preserving existing completion state)
             for item in scan_result.items:
                 meta_json = json.dumps(item.metadata, ensure_ascii=False)
                 cursor.execute(
-                    "SELECT id FROM file_items WHERE source_id = ? AND path = ?",
+                    "SELECT id, completed, completed_at FROM file_items WHERE source_id = ? AND path = ?",
                     (source_id, item.path),
                 )
                 existing_item = cursor.fetchone()
 
                 if existing_item:
+                    # Update metadata and title, but PRESERVE completed and completed_at!
                     cursor.execute(
                         """
                         UPDATE file_items
@@ -72,8 +74,8 @@ class SourceService:
                 else:
                     cursor.execute(
                         """
-                        INSERT INTO file_items (source_id, path, title, type, metadata, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO file_items (source_id, path, title, type, metadata, completed, completed_at, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)
                         """,
                         (source_id, item.path, item.title, item.type, meta_json, now, now),
                     )
@@ -81,8 +83,8 @@ class SourceService:
 
             conn.commit()
 
-        # Fetch total item count
-        total_items = self.get_item_count_for_source(source_id)
+        # Fetch progress and item count
+        completed_cnt, total_items, _ = self.get_source_progress(source_id)
         source = Source(
             id=source_id,
             name=scan_result.source_name,
@@ -90,17 +92,19 @@ class SourceService:
             created_at=created_at,
             updated_at=now,
             item_count=total_items,
+            completed_count=completed_cnt,
         )
         return source, added_count, updated_count
 
     def get_sources(self) -> List[Source]:
-        """Retrieve all imported sources with their item counts."""
+        """Retrieve all imported sources with their item counts and completion stats."""
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT s.id, s.name, s.path, s.created_at, s.updated_at,
-                       COUNT(fi.id) AS item_count
+                       COUNT(fi.id) AS item_count,
+                       COALESCE(SUM(CASE WHEN fi.completed = 1 THEN 1 ELSE 0 END), 0) AS completed_count
                 FROM sources s
                 LEFT JOIN file_items fi ON fi.source_id = s.id
                 GROUP BY s.id
@@ -117,6 +121,7 @@ class SourceService:
                 created_at=r["created_at"],
                 updated_at=r["updated_at"],
                 item_count=r["item_count"],
+                completed_count=r["completed_count"],
             )
             for r in rows
         ]
@@ -128,7 +133,8 @@ class SourceService:
             cursor.execute(
                 """
                 SELECT s.id, s.name, s.path, s.created_at, s.updated_at,
-                       COUNT(fi.id) AS item_count
+                       COUNT(fi.id) AS item_count,
+                       COALESCE(SUM(CASE WHEN fi.completed = 1 THEN 1 ELSE 0 END), 0) AS completed_count
                 FROM sources s
                 LEFT JOIN file_items fi ON fi.source_id = s.id
                 WHERE s.id = ?
@@ -148,6 +154,7 @@ class SourceService:
             created_at=r["created_at"],
             updated_at=r["updated_at"],
             item_count=r["item_count"],
+            completed_count=r["completed_count"],
         )
 
     def get_source_by_path(self, path: str) -> Optional[Source]:
@@ -157,7 +164,8 @@ class SourceService:
             cursor.execute(
                 """
                 SELECT s.id, s.name, s.path, s.created_at, s.updated_at,
-                       COUNT(fi.id) AS item_count
+                       COUNT(fi.id) AS item_count,
+                       COALESCE(SUM(CASE WHEN fi.completed = 1 THEN 1 ELSE 0 END), 0) AS completed_count
                 FROM sources s
                 LEFT JOIN file_items fi ON fi.source_id = s.id
                 WHERE s.path = ?
@@ -177,6 +185,7 @@ class SourceService:
             created_at=r["created_at"],
             updated_at=r["updated_at"],
             item_count=r["item_count"],
+            completed_count=r["completed_count"],
         )
 
     def get_items_by_source(self, source_id: int) -> List[FileItem]:
@@ -185,7 +194,7 @@ class SourceService:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT id, source_id, path, title, type, metadata, created_at, updated_at
+                SELECT id, source_id, path, title, type, metadata, completed, completed_at, created_at, updated_at
                 FROM file_items
                 WHERE source_id = ?
                 ORDER BY path ASC
@@ -208,6 +217,8 @@ class SourceService:
                     title=r["title"],
                     type=r["type"],
                     metadata=meta,
+                    completed=bool(r["completed"]),
+                    completed_at=r["completed_at"],
                     created_at=r["created_at"],
                     updated_at=r["updated_at"],
                 )
@@ -220,7 +231,7 @@ class SourceService:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT id, source_id, path, title, type, metadata, created_at, updated_at
+                SELECT id, source_id, path, title, type, metadata, completed, completed_at, created_at, updated_at
                 FROM file_items
                 WHERE id = ?
                 """,
@@ -243,17 +254,116 @@ class SourceService:
             title=r["title"],
             type=r["type"],
             metadata=meta,
+            completed=bool(r["completed"]),
+            completed_at=r["completed_at"],
             created_at=r["created_at"],
             updated_at=r["updated_at"],
         )
 
-    def get_item_count_for_source(self, source_id: int) -> int:
-        """Count items for a given source ID."""
+    def get_source_progress(self, source_id: int) -> Tuple[int, int, int]:
+        """Return (completed_items, total_items, percentage)."""
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT COUNT(id) AS cnt FROM file_items WHERE source_id = ?",
+                """
+                SELECT COUNT(id) AS total,
+                       COALESCE(SUM(CASE WHEN completed = 1 THEN 1 ELSE 0 END), 0) AS completed
+                FROM file_items
+                WHERE source_id = ?
+                """,
                 (source_id,),
             )
             row = cursor.fetchone()
-            return row["cnt"] if row else 0
+            total = row["total"] if row else 0
+            completed = row["completed"] if row else 0
+            pct = int((completed / total) * 100) if total > 0 else 0
+            return completed, total, pct
+
+    def toggle_item_completion(self, item_id: int) -> Optional[FileItem]:
+        """
+        Toggle the completed state of a FileItem in SQLite.
+        Syncs state two-way with associated Task entities and today's schedule.
+        Files on disk remain 100% untouched.
+        """
+        now = datetime.now().isoformat()
+        today_str = datetime.now().date().isoformat()
+
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, source_id, completed FROM file_items WHERE id = ?",
+                (item_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            new_completed = 0 if row["completed"] else 1
+            new_completed_at = now if new_completed else None
+
+            cursor.execute(
+                "UPDATE file_items SET completed = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+                (new_completed, new_completed_at, now, item_id),
+            )
+
+            # Two-way sync: update associated task if it exists
+            new_status = "completed" if new_completed else "pending"
+            cursor.execute(
+                "SELECT id FROM tasks WHERE source_type = 'filemeta' AND source_id = ?",
+                (item_id,),
+            )
+            tasks = cursor.fetchall()
+            for t in tasks:
+                cursor.execute(
+                    "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+                    (new_status, now, t["id"]),
+                )
+                # If scheduled for today, sync daily task completed_at
+                cursor.execute(
+                    "UPDATE daily_tasks SET completed_at = ? WHERE task_id = ? AND date = ?",
+                    (new_completed_at, t["id"], today_str),
+                )
+
+            conn.commit()
+
+        return self.get_item_by_id(item_id)
+
+    def set_item_completion(self, item_id: int, completed: bool) -> None:
+        """Set completion status directly (called when an associated task is completed)."""
+        now = datetime.now().isoformat()
+        comp_val = 1 if completed else 0
+        comp_at = now if completed else None
+
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE file_items SET completed = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+                (comp_val, comp_at, now, item_id),
+            )
+            conn.commit()
+
+    def delete_source(self, source_id: int) -> bool:
+        """
+        Delete a Filemeta source from the Todo database.
+        Cleans up FileItems in SQLite and unlinks tasks without deleting user tasks.
+        NEVER touches or deletes anything from the filesystem.
+        """
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            # 1. Unlink any user tasks referencing this source's file items
+            cursor.execute(
+                """
+                UPDATE tasks
+                SET source_id = NULL
+                WHERE source_type = 'filemeta'
+                  AND source_id IN (SELECT id FROM file_items WHERE source_id = ?)
+                """,
+                (source_id,),
+            )
+
+            # 2. Delete source (file_items cascade via SQLite foreign key)
+            cursor.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+            deleted = cursor.rowcount > 0
+            conn.commit()
+
+        return deleted

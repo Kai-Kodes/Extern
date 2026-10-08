@@ -1,9 +1,13 @@
-"""Console and rendering helpers for the terminal UI."""
+"""Console, alternate screen buffer, and keyboard input helpers for full-screen TUI."""
 
-import os
+import atexit
+import contextlib
+import select
 import sys
+import termios
+import tty
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from rich import box
 from rich.console import Console
@@ -11,6 +15,46 @@ from rich.panel import Panel
 from rich.text import Text
 
 console = Console()
+
+# Keep track of alt-screen state to ensure restoration on exit
+_IN_ALT_SCREEN = False
+
+
+def enter_alt_screen() -> None:
+    """Enter terminal alternate screen buffer and hide cursor if in a TTY."""
+    global _IN_ALT_SCREEN
+    if sys.stdout.isatty() and not _IN_ALT_SCREEN:
+        console.set_alt_screen(True)
+        console.show_cursor(False)
+        _IN_ALT_SCREEN = True
+
+
+def exit_alt_screen() -> None:
+    """Exit terminal alternate screen buffer and restore cursor."""
+    global _IN_ALT_SCREEN
+    if sys.stdout.isatty() and _IN_ALT_SCREEN:
+        console.show_cursor(True)
+        console.set_alt_screen(False)
+        _IN_ALT_SCREEN = False
+
+
+# Register atexit handler for safe terminal restoration
+atexit.register(exit_alt_screen)
+
+
+@contextlib.contextmanager
+def alt_screen():
+    """Context manager for running in alternate screen buffer with guaranteed restoration."""
+    enter_alt_screen()
+    try:
+        yield
+    finally:
+        exit_alt_screen()
+
+
+def clear_viewport() -> None:
+    """Clear the viewport screen."""
+    console.clear()
 
 
 def format_today_title(date_obj: Optional[datetime] = None) -> str:
@@ -24,19 +68,28 @@ def format_today_title(date_obj: Optional[datetime] = None) -> str:
 
 def render_header(title: str, subtitle: Optional[str] = None) -> None:
     """Render a styled rounded top panel header."""
-    header_text = Text()
-    header_text.append(f" {title.upper()} ", style="bold bright_white on dark_blue")
-    if subtitle:
-        header_text.append(f"\n{subtitle}", style="dim")
-
+    title_text = Text(title.upper(), style="bold bright_white", justify="center")
+    sub = f"[dim]{subtitle}[/dim]" if subtitle else None
     console.print(
         Panel(
-            header_text,
+            title_text,
             box=box.ROUNDED,
-            border_style="bright_blue",
+            border_style="cyan",
+            subtitle=sub,
             padding=(0, 2),
         )
     )
+
+
+def render_footer(hints: List[Tuple[str, str]]) -> None:
+    """Render a styled keyboard hints footer."""
+    console.print("[dim]─" * 50 + "[/dim]")
+    parts = []
+    for key, action in hints:
+        # Escape any square brackets in keys
+        escaped_key = key.replace("[", "\\[").replace("]", "\\]")
+        parts.append(f"[bold cyan]{escaped_key}[/bold cyan] [dim]{action}[/dim]")
+    console.print("  " + "   ".join(parts) + "\n")
 
 
 def print_status_message(message: str, style: str = "green") -> None:
@@ -44,6 +97,77 @@ def print_status_message(message: str, style: str = "green") -> None:
     console.print(f"[{style}]  {message}[/{style}]\n")
 
 
+def render_progress_bar(completed: int, total: int, width: int = 16) -> str:
+    """Generate a clean unicode progress bar string."""
+    if total <= 0:
+        return "░" * width + " 0%"
+    pct = int((completed / total) * 100)
+    filled_len = int(width * completed / total)
+    bar = "█" * filled_len + "░" * (width - filled_len)
+    return f"{bar} {pct}%"
+
+
+def read_key() -> str:
+    """
+    Read a single keypress or command.
+    In interactive TTY: reads raw key (including arrows, Enter, single chars).
+    In non-TTY (tests/pipes): reads a line from stdin.
+    """
+    if not sys.stdin.isatty():
+        line = sys.stdin.readline()
+        if not line:
+            raise EOFError()
+        return line.strip()
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":  # Escape sequence
+            r, _, _ = select.select([sys.stdin], [], [], 0.05)
+            if r:
+                ch2 = sys.stdin.read(1)
+                if ch2 == "[":
+                    ch3 = sys.stdin.read(1)
+                    if ch3 == "A":
+                        return "up"
+                    elif ch3 == "B":
+                        return "down"
+                    elif ch3 == "C":
+                        return "right"
+                    elif ch3 == "D":
+                        return "left"
+                    return f"esc[{ch3}"
+                return f"esc{ch2}"
+            return "esc"
+        elif ch in ("\r", "\n"):
+            return "enter"
+        elif ch == "\x03":  # Ctrl+C
+            raise KeyboardInterrupt()
+        elif ch == "\x04":  # Ctrl+D
+            raise EOFError()
+        elif ch in ("\x7f", "\x08"):
+            return "backspace"
+        return ch
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
 def prompt_input(prompt_text: str = "> ") -> str:
-    """Prompt for input with clean EOF and interrupt propagation."""
-    return console.input(prompt_text).strip()
+    """
+    Prompt user for full line input with cursor shown.
+    Handles TTY and non-TTY transparently.
+    """
+    if not sys.stdin.isatty():
+        line = sys.stdin.readline()
+        if not line:
+            raise EOFError()
+        return line.strip()
+
+    console.show_cursor(True)
+    try:
+        val = console.input(prompt_text).strip()
+    finally:
+        console.show_cursor(False)
+    return val

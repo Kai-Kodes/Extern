@@ -13,6 +13,13 @@ class Source:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
     item_count: int = 0
+    completed_count: int = 0
+
+    @property
+    def progress_pct(self) -> int:
+        if self.item_count <= 0:
+            return 0
+        return int((self.completed_count / self.item_count) * 100)
 
 
 @dataclass
@@ -23,6 +30,8 @@ class FileItem:
     type: str = "file"
     metadata: Dict[str, Any] = field(default_factory=dict)
     id: Optional[int] = None
+    completed: bool = False
+    completed_at: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
 

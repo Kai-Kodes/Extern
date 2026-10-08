@@ -74,9 +74,9 @@ def test_today_view_empty_state_rendering():
         output = capture.get()
 
         assert "TODAY" in output
-        assert "No tasks for today." in output
-        assert "[+] Add task" in output
-        assert "[q] Quit" in output
+        assert "No tasks" in output
+        assert "Add task" in output
+        assert "Quit" in output
 
 
 def test_today_view_with_tasks_rendering():

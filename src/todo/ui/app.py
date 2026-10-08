@@ -1,4 +1,4 @@
-"""Main interactive terminal application controller."""
+"""Main interactive terminal application controller with full-screen TUI."""
 
 import sys
 from datetime import datetime
@@ -11,7 +11,13 @@ from todo.services.daily_service import DailyService
 from todo.services.source_service import SourceService
 from todo.services.task_service import TaskService
 from todo.ui.add_task_view import AddTaskView
-from todo.ui.console import console, print_status_message, prompt_input
+from todo.ui.console import (
+    alt_screen,
+    clear_viewport,
+    console,
+    prompt_input,
+    read_key,
+)
 from todo.ui.filemeta_view import FilemetaView
 from todo.ui.manual_view import ManualView
 from todo.ui.today_view import TodayView
@@ -27,7 +33,7 @@ class TodoApp:
         self.daily_service = DailyService(self.db)
         self.filemeta_adapter = FilemetaAdapter(self.config.filemeta_command)
 
-        self.today_view = TodayView(self.daily_service)
+        self.today_view = TodayView(self.daily_service, self.task_service)
         self.add_task_view = AddTaskView()
         self.filemeta_view = FilemetaView(
             self.source_service,
@@ -39,28 +45,73 @@ class TodoApp:
         self.manual_view = ManualView(self.task_service, self.daily_service)
 
     def run(self) -> None:
-        """Run the main interactive application loop."""
+        """Run the main interactive application loop inside the alternate terminal screen."""
+        with alt_screen():
+            self._main_loop()
+
+    def _main_loop(self) -> None:
         status_msg: Optional[str] = None
         status_style: str = "green"
+        selected_idx = 0
 
         while True:
             try:
                 today_str = datetime.now().date().isoformat()
                 tasks = self.daily_service.get_tasks_for_date(today_str)
 
-                # Render main Today screen
-                self.today_view.render(tasks, status_msg=status_msg)
+                # Clamp selected_idx
+                if tasks:
+                    selected_idx = max(0, min(selected_idx, len(tasks) - 1))
+                else:
+                    selected_idx = 0
+
+                # Render Today viewport
+                self.today_view.render(
+                    tasks,
+                    status_msg=status_msg,
+                    status_style=status_style,
+                    selected_idx=selected_idx,
+                    clear=True,
+                )
                 status_msg = None
                 status_style = "green"
 
                 choice = prompt_input("> ")
 
                 if choice.lower() in ("q", "quit", "exit"):
-                    console.print("[dim]Goodbye![/dim]\n")
                     break
+
+                if choice == "up":
+                    if tasks:
+                        selected_idx = max(0, selected_idx - 1)
+                    continue
+
+                if choice == "down":
+                    if tasks:
+                        selected_idx = min(len(tasks) - 1, selected_idx + 1)
+                    continue
+
+                if choice == "enter":
+                    if tasks:
+                        selected_daily = tasks[selected_idx]
+                        updated = self.daily_service.toggle_task_completion(selected_daily.id)
+                        if updated and updated.is_completed:
+                            status_msg = f"✓ Completed: \"{updated.task.title}\""
+                            status_style = "green"
+                        elif updated:
+                            status_msg = f"○ Marked pending: \"{updated.task.title}\""
+                            status_style = "yellow"
+                    continue
 
                 if choice in ("+", "add"):
                     status_msg = self.handle_add_task_menu()
+                    continue
+
+                if choice.lower() in ("d", "delete"):
+                    del_msg = self.today_view.handle_delete(tasks, current_idx=selected_idx)
+                    if del_msg:
+                        status_msg = del_msg
+                        status_style = "yellow"
                     continue
 
                 if choice.lower() in ("u", "universal"):
@@ -71,6 +122,7 @@ class TodoApp:
                     idx = int(choice)
                     if 1 <= idx <= len(tasks):
                         selected_daily = tasks[idx - 1]
+                        selected_idx = idx - 1
                         updated = self.daily_service.toggle_task_completion(selected_daily.id)
                         if updated and updated.is_completed:
                             status_msg = f"✓ Completed: \"{updated.task.title}\""
@@ -83,11 +135,10 @@ class TodoApp:
                         status_style = "red"
                 else:
                     if choice:
-                        status_msg = "Unknown option. Use [1-N] to toggle, '+' to add task, or 'q' to quit."
+                        status_msg = "Unknown option. Use [1-N] to toggle, '+' to add, 'd' to delete, or 'q' to quit."
                         status_style = "yellow"
 
             except (KeyboardInterrupt, EOFError):
-                console.print("\n[dim]Goodbye![/dim]\n")
                 break
 
     def handle_add_task_menu(self) -> Optional[str]:
@@ -95,28 +146,25 @@ class TodoApp:
         add_status: Optional[str] = None
 
         while True:
-            self.add_task_view.render(status_msg=add_status)
+            self.add_task_view.render(status_msg=add_status, clear=True)
             add_status = None
 
             choice = prompt_input("Select option [1-3, b]: ")
 
-            if choice.lower() in ("b", "back", "q", "quit"):
+            if choice.lower() in ("b", "back", "q", "quit", "cancel"):
                 return None
 
             if choice == "1":
-                # Filemeta workflow
                 result = self.filemeta_view.run()
                 if result:
                     return result
 
             elif choice == "2":
-                # Universal task workflow
                 result = self.universal_view.run(select_mode=True)
                 if result:
                     return result
 
             elif choice == "3":
-                # Manual task workflow
                 result = self.manual_view.run()
                 if result:
                     return result

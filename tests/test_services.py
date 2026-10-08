@@ -203,6 +203,173 @@ def test_completing_and_reopening_today_task(test_env):
     assert reopened_dt.task.status == "pending"
 
 
+def test_delete_today_association_preserves_task(test_env):
+    """Removing a task from Today must NOT delete the underlying universal task."""
+    task_svc = test_env["task_svc"]
+    daily_svc = test_env["daily_svc"]
+    today_str = datetime.now().date().isoformat()
+
+    u_task = task_svc.create_task("Learn React", source_type="universal")
+    dt, _ = daily_svc.add_task_to_date(u_task.id, today_str)
+
+    assert len(daily_svc.get_tasks_for_date(today_str)) == 1
+
+    # Remove from Today
+    daily_svc.remove_daily_task(dt.id)
+    assert len(daily_svc.get_tasks_for_date(today_str)) == 0
+
+    # Underlying universal task still exists
+    persisted_task = task_svc.get_task_by_id(u_task.id)
+    assert persisted_task is not None
+    assert persisted_task.title == "Learn React"
+
+
+def test_delete_universal_task_cascades_cleanly(test_env):
+    """Deleting a universal task cascades and cleans up daily schedule without orphans."""
+    task_svc = test_env["task_svc"]
+    daily_svc = test_env["daily_svc"]
+    today_str = datetime.now().date().isoformat()
+
+    u_task = task_svc.create_task("Learn React", source_type="universal")
+    dt, _ = daily_svc.add_task_to_date(u_task.id, today_str)
+
+    # Delete universal task
+    deleted = task_svc.delete_task(u_task.id)
+    assert deleted is True
+
+    # No task, and no orphaned daily_tasks
+    assert task_svc.get_task_by_id(u_task.id) is None
+    assert len(daily_svc.get_tasks_for_date(today_str)) == 0
+
+
+def test_delete_filemeta_source_preserves_filesystem(test_env):
+    """Deleting a source removes database records, unlinks tasks, and leaves filesystem untouched."""
+    source_svc = test_env["source_svc"]
+    task_svc = test_env["task_svc"]
+
+    with tempfile.TemporaryDirectory() as disk_dir:
+        course_folder = Path(disk_dir) / "Real Course"
+        course_folder.mkdir()
+        video_file = course_folder / "Lesson.mp4"
+        video_file.write_text("dummy real content")
+
+        scan = FilemetaScanResult(
+            source_name="Real Course",
+            source_path=str(course_folder),
+            items=[
+                ScannedFile(
+                    name="Lesson.mp4",
+                    path=str(video_file),
+                    title="Lesson",
+                    type="video",
+                )
+            ],
+        )
+        source, _, _ = source_svc.add_or_update_source(scan)
+        items = source_svc.get_items_by_source(source.id)
+        task = task_svc.get_or_create_filemeta_task(items[0], source.name)
+
+        # Delete source from database
+        deleted = source_svc.delete_source(source.id)
+        assert deleted is True
+
+        # Database source and items are deleted
+        assert source_svc.get_source_by_id(source.id) is None
+        assert len(source_svc.get_items_by_source(source.id)) == 0
+
+        # User's task is preserved, but unlinked from dangling file item
+        persisted_task = task_svc.get_task_by_id(task.id)
+        assert persisted_task is not None
+        assert persisted_task.source_id is None
+
+        # CRITICAL: Files on disk MUST STILL EXIST!
+        assert course_folder.exists()
+        assert video_file.exists()
+        assert video_file.read_text() == "dummy real content"
+
+
+def test_filemeta_item_completion_and_two_way_sync(test_env):
+    """Test two-way completion sync between FileItem and Task, plus course progress."""
+    source_svc = test_env["source_svc"]
+    task_svc = test_env["task_svc"]
+    daily_svc = test_env["daily_svc"]
+    today_str = datetime.now().date().isoformat()
+
+    scan = FilemetaScanResult(
+        source_name="DBMS Course",
+        source_path="/tmp/dbms",
+        items=[
+            ScannedFile(name="01.mp4", path="/tmp/dbms/01.mp4", title="01", type="video"),
+            ScannedFile(name="02.mp4", path="/tmp/dbms/02.mp4", title="02", type="video"),
+        ],
+    )
+    source, _, _ = source_svc.add_or_update_source(scan)
+    items = source_svc.get_items_by_source(source.id)
+
+    # Initial progress: 0/2
+    comp, total, pct = source_svc.get_source_progress(source.id)
+    assert comp == 0
+    assert total == 2
+    assert pct == 0
+
+    # Direction A: Add item 1 to today and complete it
+    task1 = task_svc.get_or_create_filemeta_task(items[0], source.name)
+    dt1, _ = daily_svc.add_task_to_date(task1.id, today_str)
+    daily_svc.toggle_task_completion(dt1.id)
+
+    # Check FileItem is now completed!
+    refreshed_items = source_svc.get_items_by_source(source.id)
+    assert refreshed_items[0].completed is True
+    assert refreshed_items[1].completed is False
+
+    comp, total, pct = source_svc.get_source_progress(source.id)
+    assert comp == 1
+    assert pct == 50
+
+    # Direction B: Toggle item 2 directly in Filemeta
+    source_svc.toggle_item_completion(items[1].id)
+    comp, total, pct = source_svc.get_source_progress(source.id)
+    assert comp == 2
+    assert pct == 100
+
+
+def test_completion_survives_rescan(test_env):
+    """Fileitem completion state must survive a folder rescan."""
+    source_svc = test_env["source_svc"]
+
+    scan1 = FilemetaScanResult(
+        source_name="Course",
+        source_path="/tmp/rescan_course",
+        items=[
+            ScannedFile(name="01.mp4", path="/tmp/rescan_course/01.mp4", title="01", type="video"),
+        ],
+    )
+    source, _, _ = source_svc.add_or_update_source(scan1)
+    items = source_svc.get_items_by_source(source.id)
+
+    # Mark item completed
+    source_svc.set_item_completion(items[0].id, True)
+    assert source_svc.get_items_by_source(source.id)[0].completed is True
+
+    # Rescan folder
+    scan2 = FilemetaScanResult(
+        source_name="Course Updated",
+        source_path="/tmp/rescan_course",
+        items=[
+            ScannedFile(name="01.mp4", path="/tmp/rescan_course/01.mp4", title="01 - Renamed", type="video"),
+            ScannedFile(name="02.mp4", path="/tmp/rescan_course/02.mp4", title="02", type="video"),
+        ],
+    )
+    source_svc.add_or_update_source(scan2)
+
+    # Item 1 must STILL be completed!
+    rescanned_items = source_svc.get_items_by_source(source.id)
+    item_map = {it.path: it for it in rescanned_items}
+    assert item_map["/tmp/rescan_course/01.mp4"].completed is True
+    assert item_map["/tmp/rescan_course/01.mp4"].title == "01 - Renamed"
+    assert item_map["/tmp/rescan_course/02.mp4"].completed is False
+
+
 def test_data_persistence_across_restarts(test_env):
     db_path = test_env["db_path"]
     today_str = datetime.now().date().isoformat()

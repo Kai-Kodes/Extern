@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS file_items (
     title TEXT NOT NULL,
     type TEXT NOT NULL DEFAULT 'file',
     metadata TEXT NOT NULL DEFAULT '{}',
+    completed INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(source_id, path)
@@ -74,6 +76,17 @@ class Database:
         return conn
 
     def init_db(self) -> None:
-        """Initialize the database schema."""
+        """Initialize the database schema and apply any necessary column migrations."""
         with self.get_connection() as conn:
             conn.executescript(SCHEMA_SQL)
+            # Migration check for existing databases
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(file_items)")
+            columns = {row["name"] for row in cursor.fetchall()}
+            if "completed" not in columns:
+                cursor.execute(
+                    "ALTER TABLE file_items ADD COLUMN completed INTEGER NOT NULL DEFAULT 0"
+                )
+            if "completed_at" not in columns:
+                cursor.execute("ALTER TABLE file_items ADD COLUMN completed_at TEXT")
+            conn.commit()

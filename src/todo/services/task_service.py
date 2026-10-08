@@ -132,21 +132,47 @@ class TaskService:
             )
 
         desc = f"Source: {source_name}" if source_name else ""
+        initial_status = "completed" if file_item.completed else "pending"
         return self.create_task(
             title=file_item.title,
             description=desc,
             source_type="filemeta",
             source_id=file_item.id,
-            status="pending",
+            status=initial_status,
         )
 
     def update_task_status(self, task_id: int, status: str) -> None:
-        """Update the base status of a task."""
+        """Update the base status of a task and sync with FileItem if applicable."""
         now = datetime.now().isoformat()
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute(
+                "SELECT source_type, source_id FROM tasks WHERE id = ?",
+                (task_id,),
+            )
+            row = cursor.fetchone()
+
             cursor.execute(
                 "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
                 (status, now, task_id),
             )
             conn.commit()
+
+        if row and row["source_type"] == "filemeta" and row["source_id"]:
+            from todo.services.source_service import SourceService
+
+            SourceService(self.db).set_item_completion(
+                row["source_id"], status == "completed"
+            )
+
+    def delete_task(self, task_id: int) -> bool:
+        """
+        Delete a task permanently.
+        All associated daily_tasks are cascade-deleted by foreign keys.
+        """
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            deleted = cursor.rowcount > 0
+            conn.commit()
+        return deleted

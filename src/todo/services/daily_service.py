@@ -128,13 +128,19 @@ class DailyService:
     def toggle_task_completion(self, daily_task_id: int) -> Optional[DailyTask]:
         """
         Toggle completed status of a daily task.
-        Updates daily_tasks.completed_at and keeps underlying task status aligned.
+        Updates daily_tasks.completed_at, task.status, and syncs FileItem if applicable.
         """
         now = datetime.now().isoformat()
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, task_id, date, position, completed_at FROM daily_tasks WHERE id = ?",
+                """
+                SELECT dt.id, dt.task_id, dt.date, dt.position, dt.completed_at,
+                       t.source_type, t.source_id
+                FROM daily_tasks dt
+                JOIN tasks t ON dt.task_id = t.id
+                WHERE dt.id = ?
+                """,
                 (daily_task_id,),
             )
             row = cursor.fetchone()
@@ -143,12 +149,17 @@ class DailyService:
                 return None
 
             task_id = row["task_id"]
+            source_type = row["source_type"]
+            source_id = row["source_id"]
+
             if row["completed_at"] is None:
                 new_completed_at = now
                 new_task_status = "completed"
+                is_completed = True
             else:
                 new_completed_at = None
                 new_task_status = "pending"
+                is_completed = False
 
             cursor.execute(
                 "UPDATE daily_tasks SET completed_at = ? WHERE id = ?",
@@ -159,6 +170,11 @@ class DailyService:
                 (new_task_status, now, task_id),
             )
             conn.commit()
+
+        # Two-way sync: if originated from a FileItem, update its completed state
+        if source_type == "filemeta" and source_id:
+            from todo.services.source_service import SourceService
+            SourceService(self.db).set_item_completion(source_id, is_completed)
 
         # Fetch updated task
         from todo.services.task_service import TaskService
@@ -179,3 +195,16 @@ class DailyService:
             cursor.execute("DELETE FROM daily_tasks WHERE id = ?", (daily_task_id,))
             conn.commit()
             return cursor.rowcount > 0
+
+    def delete_daily_task_and_underlying(self, daily_task_id: int) -> bool:
+        """Remove the daily task and permanently delete the underlying task entity."""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT task_id FROM daily_tasks WHERE id = ?", (daily_task_id,))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            task_id = row["task_id"]
+
+        from todo.services.task_service import TaskService
+        return TaskService(self.db).delete_task(task_id)
