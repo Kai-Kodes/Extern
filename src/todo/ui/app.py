@@ -12,13 +12,13 @@ from todo.services.source_service import SourceService
 from todo.services.task_service import TaskService
 from todo.ui.add_task_view import AddTaskView
 from todo.ui.console import (
-    alt_screen,
     clear_viewport,
     console,
-    prompt_input,
     read_key,
+    tui_mode,
 )
 from todo.ui.filemeta_view import FilemetaView
+from todo.ui.key_reader import Key, key_reader
 from todo.ui.manual_view import ManualView
 from todo.ui.today_view import TodayView
 from todo.ui.universal_view import UniversalView
@@ -46,7 +46,7 @@ class TodoApp:
 
     def run(self) -> None:
         """Run the main interactive application loop inside the alternate terminal screen."""
-        with alt_screen():
+        with tui_mode():
             self._main_loop()
 
     def _main_loop(self) -> None:
@@ -76,34 +76,34 @@ class TodoApp:
                 status_msg = None
                 status_style = "green"
 
-                choice = prompt_input("> ")
+                choice = read_key()
 
-                if choice.lower() in ("q", "quit", "exit"):
+                if choice in (Key.ESCAPE, "q", "quit", "exit"):
                     break
 
-                if choice == "up":
+                if choice in (Key.UP, "up"):
                     if tasks:
                         selected_idx = max(0, selected_idx - 1)
                     continue
 
-                if choice == "down":
+                if choice in (Key.DOWN, "down"):
                     if tasks:
                         selected_idx = min(len(tasks) - 1, selected_idx + 1)
                     continue
 
-                if choice == "enter":
+                if choice in (Key.ENTER, "enter"):
                     if tasks:
                         selected_daily = tasks[selected_idx]
                         updated = self.daily_service.toggle_task_completion(selected_daily.id)
                         if updated and updated.is_completed:
-                            status_msg = f"✓ Completed: \"{updated.task.title}\""
+                            status_msg = f'✓ Completed: "{updated.task.title}"'
                             status_style = "green"
                         elif updated:
-                            status_msg = f"○ Marked pending: \"{updated.task.title}\""
+                            status_msg = f'○ Marked pending: "{updated.task.title}"'
                             status_style = "yellow"
                     continue
 
-                if choice in ("+", "add"):
+                if choice in ("+", Key.PLUS, "add"):
                     status_msg = self.handle_add_task_menu()
                     continue
 
@@ -125,17 +125,17 @@ class TodoApp:
                         selected_idx = idx - 1
                         updated = self.daily_service.toggle_task_completion(selected_daily.id)
                         if updated and updated.is_completed:
-                            status_msg = f"✓ Completed: \"{updated.task.title}\""
+                            status_msg = f'✓ Completed: "{updated.task.title}"'
                             status_style = "green"
                         elif updated:
-                            status_msg = f"○ Marked pending: \"{updated.task.title}\""
+                            status_msg = f'○ Marked pending: "{updated.task.title}"'
                             status_style = "yellow"
                     else:
                         status_msg = f"Invalid selection: #{choice}. Please enter 1-{len(tasks)}."
                         status_style = "red"
                 else:
                     if choice:
-                        status_msg = "Unknown option. Use [1-N] to toggle, '+' to add, 'd' to delete, or 'q' to quit."
+                        status_msg = "Unknown option. Use [↑/↓] to navigate, [Enter] to toggle, '+' to add, 'd' to delete, or 'q' to quit."
                         status_style = "yellow"
 
             except (KeyboardInterrupt, EOFError):
@@ -144,15 +144,29 @@ class TodoApp:
     def handle_add_task_menu(self) -> Optional[str]:
         """Show Add Task menu and dispatch to the corresponding workflow."""
         add_status: Optional[str] = None
+        selected_idx = 0
 
         while True:
-            self.add_task_view.render(status_msg=add_status, clear=True)
+            self.add_task_view.render(
+                status_msg=add_status, selected_idx=selected_idx, clear=True
+            )
             add_status = None
 
-            choice = prompt_input("Select option [1-3, b]: ")
+            choice = read_key()
 
-            if choice.lower() in ("b", "back", "q", "quit", "cancel"):
+            if choice in (Key.ESCAPE, "b", "back", "q", "quit", "cancel"):
                 return None
+
+            if choice in (Key.UP, "up"):
+                selected_idx = max(0, selected_idx - 1)
+                continue
+
+            if choice in (Key.DOWN, "down"):
+                selected_idx = min(2, selected_idx + 1)
+                continue
+
+            if choice in (Key.ENTER, "enter"):
+                choice = str(selected_idx + 1)
 
             if choice == "1":
                 result = self.filemeta_view.run()
@@ -171,3 +185,4 @@ class TodoApp:
 
             else:
                 add_status = "Invalid option. Please choose 1, 2, 3, or 'b' to go back."
+

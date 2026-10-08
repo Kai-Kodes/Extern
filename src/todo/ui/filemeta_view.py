@@ -1,22 +1,11 @@
-"""Filemeta workflow views: sources list, folder importer, course details, and completion tracking."""
+"""Filemeta workflow views with centralized keyboard input and course progress."""
 
 from datetime import datetime
-from pathlib import Path
 from typing import List, Optional, Tuple
 
 from rich.table import Table
 from rich.text import Text
 
-from todo.integrations.filemeta import (
-    FilemetaAdapter,
-    FilemetaError,
-    FilemetaExecutionError,
-    FilemetaNotFoundError,
-    FilemetaParseError,
-    FolderNotFoundError,
-    InvalidFolderError,
-    PermissionDeniedError,
-)
 from todo.models import FileItem, Source
 from todo.services.daily_service import DailyService
 from todo.services.source_service import SourceService
@@ -25,11 +14,11 @@ from todo.ui.console import (
     clear_viewport,
     console,
     print_status_message,
-    prompt_input,
     render_footer,
     render_header,
     render_progress_bar,
 )
+from todo.ui.key_reader import Key, key_reader
 
 
 class FilemetaView:
@@ -38,7 +27,7 @@ class FilemetaView:
         source_service: SourceService,
         task_service: TaskService,
         daily_service: DailyService,
-        filemeta_adapter: FilemetaAdapter,
+        filemeta_adapter,
     ):
         self.source_service = source_service
         self.task_service = task_service
@@ -46,12 +35,10 @@ class FilemetaView:
         self.filemeta_adapter = filemeta_adapter
 
     def run(self) -> Optional[str]:
-        """
-        Main loop for Filemeta sources in full-screen TUI.
-        Returns a status message to display on the Today view if a task was added.
-        """
+        """Main loop for Filemeta sources in full-screen TUI."""
         status_msg: Optional[str] = None
         status_style: str = "green"
+        selected_idx = 0
 
         while True:
             clear_viewport()
@@ -64,42 +51,57 @@ class FilemetaView:
                 status_style = "green"
 
             if not sources:
-                console.print("  [dim italic]No Filemeta sources imported yet.[/dim italic]\n")
+                console.print(
+                    "  [dim italic]No Filemeta sources imported yet.[/dim italic]\n"
+                )
                 hints = [("+", "Add folder"), ("b", "Back")]
                 render_footer(hints)
             else:
+                if selected_idx >= len(sources):
+                    selected_idx = max(0, len(sources) - 1)
+
                 table = Table.grid(padding=(0, 1))
+                table.add_column("cursor", justify="right", style="cyan bold", width=2)
                 table.add_column("num", justify="right", style="cyan bold", width=4)
                 table.add_column("name", style="bold white", width=32)
                 table.add_column("progress", style="cyan")
 
-                for idx, src in enumerate(sources, start=1):
-                    pct_str = f"{src.progress_pct}% ({src.completed_count}/{src.item_count})"
-                    table.add_row(f"{idx}.", src.name, Text(pct_str, style="dim cyan"))
-                    table.add_row("", Text(f"   {src.path}", style="dim"), "")
+                for idx, src in enumerate(sources):
+                    cursor = "▶" if idx == selected_idx else " "
+                    pct_str = (
+                        f"{src.progress_pct}% ({src.completed_count}/{src.item_count})"
+                    )
+                    table.add_row(
+                        cursor, f"{idx + 1}.", src.name, Text(pct_str, style="dim cyan")
+                    )
+                    table.add_row("", "", Text(f"   {src.path}", style="dim"), "")
 
                 console.print(table)
                 console.print()
 
                 hints = [
-                    ("1-" + str(len(sources)), "Open course"),
+                    ("↑/↓", "Navigate"),
+                    ("Enter", "Open course"),
                     ("+", "Add folder"),
                     ("d", "Delete source"),
                     ("b", "Back"),
                 ]
                 render_footer(hints)
 
-            hint = (
-                f"Select source [1-{len(sources)}, +, d, b]: "
-                if sources
-                else "Option [+, b]: "
-            )
-            choice = prompt_input(hint)
+            k = key_reader.read_key()
 
-            if choice.lower() in ("b", "back", "q", "quit", "cancel"):
+            if k in (Key.ESCAPE, "b", "q", "cancel"):
                 return None
 
-            if choice in ("+", "add"):
+            if k == Key.UP and sources:
+                selected_idx = max(0, selected_idx - 1)
+                continue
+
+            if k == Key.DOWN and sources:
+                selected_idx = min(len(sources) - 1, selected_idx + 1)
+                continue
+
+            if k in ("+", Key.PLUS, "add"):
                 res_msg, res_src = self.handle_add_folder()
                 if res_src:
                     item_msg = self.handle_source_items(res_src)
@@ -110,94 +112,117 @@ class FilemetaView:
                     status_style = "yellow"
                 continue
 
-            if choice.lower() in ("d", "delete"):
-                del_msg = self.handle_delete_source(sources)
+            if k in ("d", "delete") and sources:
+                del_msg = self.handle_delete_source(sources, current_idx=selected_idx)
                 if del_msg:
                     status_msg = del_msg
                     status_style = "yellow"
                 continue
 
-            if choice.isdigit() and sources:
-                idx = int(choice)
+            if (k == Key.ENTER or k == "enter") and sources:
+                selected_source = sources[selected_idx]
+                item_msg = self.handle_source_items(selected_source)
+                if item_msg:
+                    return item_msg
+                continue
+
+            if k.isdigit() and sources:
+                idx = int(k)
                 if 1 <= idx <= len(sources):
                     selected_source = sources[idx - 1]
                     item_msg = self.handle_source_items(selected_source)
                     if item_msg:
                         return item_msg
                 else:
-                    status_msg = f"Invalid selection: #{choice}. Please select 1-{len(sources)}."
+                    status_msg = f"Invalid selection: #{k}."
                     status_style = "red"
-            else:
-                status_msg = "Please enter a valid option."
-                status_style = "yellow"
 
     def handle_add_folder(self) -> Tuple[Optional[str], Optional[Source]]:
         """Prompt for folder path and scan with filemeta."""
         clear_viewport()
         render_header("ADD FILEMETA SOURCE")
         console.print("Enter folder path (or 'b' to cancel):\n")
-        path_input = prompt_input("Folder: > ")
+        path_input = key_reader.read_text_input("Folder: > ")
 
         if not path_input or path_input.lower() in ("b", "back", "cancel"):
             return None, None
 
-        with console.status("[bold cyan]Scanning folder with filemeta...[/bold cyan]", spinner="dots"):
+        with console.status(
+            "[bold cyan]Scanning folder with filemeta...[/bold cyan]", spinner="dots"
+        ):
             try:
                 scan_result = self.filemeta_adapter.scan_folder(path_input)
-            except FilemetaNotFoundError as e:
-                return f"Error: {e}", None
-            except FolderNotFoundError as e:
-                return f"Error: {e}", None
-            except InvalidFolderError as e:
-                return f"Error: {e}", None
-            except PermissionDeniedError as e:
-                return f"Error: {e}", None
-            except FilemetaExecutionError as e:
-                return f"Filemeta error: {e}", None
-            except FilemetaParseError as e:
-                return f"Parsing error: {e}", None
             except Exception as e:
-                return f"Unexpected error scanning folder: {e}", None
+                return f"Error scanning folder: {e}", None
 
         # Upsert source and items into DB
-        source, added_count, updated_count = self.source_service.add_or_update_source(scan_result)
+        source, _, _ = self.source_service.add_or_update_source(scan_result)
         return None, source
 
-    def handle_delete_source(self, sources: List[Source]) -> Optional[str]:
+    def handle_delete_source(
+        self, sources: List[Source], current_idx: int = 0
+    ) -> Optional[str]:
         """Prompt to delete an imported Filemeta source."""
         if not sources:
             return "No sources to delete."
 
-        clear_viewport()
-        render_header("DELETE FILEMETA SOURCE")
-        console.print("Select source to delete:\n")
+        del_idx = current_idx
+        while True:
+            clear_viewport()
+            render_header("DELETE FILEMETA SOURCE")
+            console.print("Select source to delete:\n")
 
-        for idx, src in enumerate(sources, start=1):
-            console.print(f"  [bold cyan]{idx}.[/bold cyan] [bold white]{src.name}[/bold white]")
-            console.print(f"     [dim]{src.path}[/dim]")
+            table = Table.grid(padding=(0, 1))
+            table.add_column("cursor", justify="right", style="cyan bold", width=2)
+            table.add_column("num", justify="right", style="cyan bold", width=4)
+            table.add_column("name", style="bold white")
+            table.add_column("path", style="dim")
 
-        console.print("\n  [bold cyan]\\[b][/bold cyan] Cancel\n")
-        choice = prompt_input(f"Select source [1-{len(sources)}, b]: ")
+            for idx, src in enumerate(sources):
+                cursor = "▶" if idx == del_idx else " "
+                table.add_row(cursor, f"{idx + 1}.", src.name, f"({src.path})")
 
-        if choice.lower() in ("b", "back", "cancel"):
-            return None
+            console.print(table)
+            console.print()
+            render_footer(
+                [
+                    ("↑/↓", "Navigate"),
+                    ("Enter", "Select"),
+                    ("b", "Cancel"),
+                ]
+            )
 
-        if not choice.isdigit() or not (1 <= int(choice) <= len(sources)):
-            return "Invalid source selection."
+            k = key_reader.read_key()
+            if k in (Key.ESCAPE, "b", "q", "cancel"):
+                return None
+            elif k == Key.UP:
+                del_idx = max(0, del_idx - 1)
+            elif k == Key.DOWN:
+                del_idx = min(len(sources) - 1, del_idx + 1)
+            elif k in (Key.ENTER, "enter"):
+                break
+            elif k.isdigit() and 1 <= int(k) <= len(sources):
+                del_idx = int(k) - 1
+                break
 
-        selected_source = sources[int(choice) - 1]
+        selected_source = sources[del_idx]
 
         clear_viewport()
         render_header("DELETE FILEMETA SOURCE", subtitle=selected_source.name)
         console.print(f"Source: [bold white]{selected_source.name}[/bold white]")
         console.print(f"Path:   [dim]{selected_source.path}[/dim]\n")
-        console.print("[yellow]This will remove the imported source and cached metadata from Todo.[/yellow]")
-        console.print("[bold green]It will NOT delete anything from the actual filesystem.[/bold green]\n")
+        console.print(
+            "[yellow]This will remove the imported source and cached metadata from Todo.[/yellow]"
+        )
+        console.print(
+            "[bold green]It will NOT delete anything from the actual filesystem.[/bold green]\n"
+        )
+        render_footer([("y", "Yes, delete"), ("n", "Cancel")])
 
-        confirm = prompt_input("Confirm delete? [y/n]: ")
-        if confirm.lower() in ("y", "yes"):
+        k_conf = key_reader.read_key()
+        if k_conf.lower() in ("y", "yes", Key.ENTER):
             self.source_service.delete_source(selected_source.id)
-            return f"Deleted source \"{selected_source.name}\". Real files remain untouched."
+            return f'Deleted source "{selected_source.name}". Real files remain untouched.'
 
         return "Deletion cancelled."
 
@@ -205,6 +230,7 @@ class FilemetaView:
         """Course details view: displays progress, item status, completion toggles, and task addition."""
         page_size = 20
         current_page = 0
+        selected_idx = 0
         status_msg: Optional[str] = None
         status_style: str = "green"
 
@@ -214,10 +240,13 @@ class FilemetaView:
             if not items:
                 render_header(source.name, subtitle=source.path)
                 print_status_message("No items found in this source.", "yellow")
-                prompt_input("Press Enter to go back...")
+                render_footer([("b", "Back")])
+                key_reader.read_key()
                 return None
 
-            completed_cnt, total_cnt, pct = self.source_service.get_source_progress(source.id)
+            completed_cnt, total_cnt, pct = self.source_service.get_source_progress(
+                source.id
+            )
             total_pages = (len(items) + page_size - 1) // page_size
 
             subtitle = f"Path: {source.path} · {total_cnt} items"
@@ -233,107 +262,154 @@ class FilemetaView:
 
             # Progress Bar Section
             progress_bar = render_progress_bar(completed_cnt, total_cnt, width=20)
-            console.print(f"  Progress: [bold cyan]{progress_bar}[/bold cyan] [dim]({completed_cnt}/{total_cnt} completed)[/dim]\n")
+            console.print(
+                f"  Progress: [bold cyan]{progress_bar}[/bold cyan] [dim]({completed_cnt}/{total_cnt} completed)[/dim]\n"
+            )
 
             start_idx = current_page * page_size
             end_idx = min(start_idx + page_size, len(items))
             page_items = items[start_idx:end_idx]
 
+            if selected_idx >= len(page_items):
+                selected_idx = max(0, len(page_items) - 1)
+
             table = Table.grid(padding=(0, 1))
+            table.add_column("cursor", justify="right", style="cyan bold", width=2)
             table.add_column("num", justify="right", style="cyan bold", width=4)
             table.add_column("icon", justify="center", width=3)
             table.add_column("title")
             table.add_column("info", style="dim")
 
-            for i, it in enumerate(page_items, start=start_idx + 1):
-                icon = Text("✓", style="bold green") if it.completed else Text("○", style="bright_yellow")
+            for i, it in enumerate(page_items):
+                cursor = "▶" if i == selected_idx else " "
+                icon = (
+                    Text("✓", style="bold green")
+                    if it.completed
+                    else Text("○", style="bright_yellow")
+                )
                 title_style = "dim strike" if it.completed else "bold white"
 
                 info_parts = []
-                if "duration_formatted" in it.metadata and it.metadata["duration_formatted"]:
+                if (
+                    "duration_formatted" in it.metadata
+                    and it.metadata["duration_formatted"]
+                ):
                     info_parts.append(f"({it.metadata['duration_formatted']})")
                 elif "pages" in it.metadata and it.metadata["pages"]:
                     info_parts.append(f"({it.metadata['pages']} pages)")
 
                 info_str = " ".join(info_parts)
-                table.add_row(f"{i}.", icon, Text(it.title, style=title_style), Text(info_str, style="dim green"))
+                table.add_row(
+                    cursor,
+                    f"{start_idx + i + 1}.",
+                    icon,
+                    Text(it.title, style=title_style),
+                    Text(info_str, style="dim green"),
+                )
 
             console.print(table)
             console.print()
 
             hints = [
-                ("1-" + str(len(items)), "Add to Today"),
+                ("↑/↓", "Navigate"),
+                ("Enter", "Add to Today"),
                 ("t", "Toggle complete"),
                 ("r", "Rescan"),
                 ("b", "Back"),
             ]
             if total_pages > 1:
-                if current_page < total_pages - 1:
-                    hints.insert(0, ("n", "Next page"))
-                if current_page > 0:
-                    hints.insert(0, ("p", "Prev page"))
+                hints.append(("n/p", "Next/Prev page"))
 
             render_footer(hints)
 
-            prompt_hint = f"Select [1-{len(items)}, t, r, b]: "
-            choice = prompt_input(prompt_hint)
+            k = key_reader.read_key()
 
-            if choice.lower() in ("b", "back", "q", "quit", "cancel"):
+            if k in (Key.ESCAPE, "b", "q", "cancel"):
                 return None
 
-            if choice.lower() in ("n", "next") and current_page < total_pages - 1:
-                current_page += 1
+            if k == Key.UP:
+                selected_idx = max(0, selected_idx - 1)
                 continue
 
-            if choice.lower() in ("p", "prev") and current_page > 0:
+            if k == Key.DOWN:
+                selected_idx = min(len(page_items) - 1, selected_idx + 1)
+                continue
+
+            if k in ("n", Key.RIGHT) and current_page < total_pages - 1:
+                current_page += 1
+                selected_idx = 0
+                continue
+
+            if k in ("p", Key.LEFT) and current_page > 0:
                 current_page -= 1
+                selected_idx = 0
                 continue
 
             # Toggle completion directly from Filemeta view
-            if choice.lower() in ("t", "toggle"):
-                t_choice = prompt_input(f"Item number to toggle [1-{len(items)}, b]: ")
-                if t_choice.isdigit() and 1 <= int(t_choice) <= len(items):
-                    sel_item = items[int(t_choice) - 1]
-                    updated = self.source_service.toggle_item_completion(sel_item.id)
-                    if updated and updated.completed:
-                        status_msg = f"✓ Completed \"{updated.title}\"."
-                        status_style = "green"
-                    elif updated:
-                        status_msg = f"○ Marked pending: \"{updated.title}\"."
-                        status_style = "yellow"
+            if k in ("t", "toggle"):
+                sel_item = page_items[selected_idx]
+                updated = self.source_service.toggle_item_completion(sel_item.id)
+                if updated and updated.completed:
+                    status_msg = f'✓ Completed "{updated.title}".'
+                    status_style = "green"
+                elif updated:
+                    status_msg = f'○ Marked pending: "{updated.title}".'
+                    status_style = "yellow"
                 continue
 
             # Rescan folder
-            if choice.lower() in ("r", "rescan"):
-                with console.status("[bold cyan]Rescanning folder...[/bold cyan]", spinner="dots"):
+            if k in ("r", "rescan"):
+                with console.status(
+                    "[bold cyan]Rescanning folder...[/bold cyan]", spinner="dots"
+                ):
                     try:
                         scan_res = self.filemeta_adapter.scan_folder(source.path)
-                        _, added_cnt, upd_cnt = self.source_service.add_or_update_source(scan_res)
-                        status_msg = f"Rescanned: {upd_cnt} updated, {added_cnt} added. Completion state preserved."
+                        _, added_cnt, upd_cnt = self.source_service.add_or_update_source(
+                            scan_res
+                        )
+                        status_msg = f"Rescanned: {upd_cnt} updated, {added_cnt} added."
                         status_style = "green"
                     except Exception as e:
                         status_msg = f"Rescan failed: {e}"
                         status_style = "red"
                 continue
 
-            if choice.isdigit():
-                sel_num = int(choice)
-                if 1 <= sel_num <= len(items):
-                    selected_item = items[sel_num - 1]
-                    # Create or get task entity
+            if k in (Key.ENTER, "enter"):
+                selected_item = page_items[selected_idx]
+                # Confirmation modal
+                clear_viewport()
+                render_header(source.name, subtitle=selected_item.title)
+                console.print(
+                    f"Add [bold white]\"{selected_item.title}\"[/bold white] to today's tasks?\n"
+                )
+                render_footer([("y / Enter", "Add to Today"), ("n", "Cancel")])
+                conf = key_reader.read_key()
+                if conf.lower() in ("y", "yes", Key.ENTER, "enter"):
                     task = self.task_service.get_or_create_filemeta_task(
                         selected_item, source_name=source.name
                     )
                     today_str = datetime.now().date().isoformat()
-                    _, is_new = self.daily_service.add_task_to_date(task.id, today_str)
-
+                    _, is_new = self.daily_service.add_task_to_date(
+                        task.id, today_str
+                    )
                     if is_new:
-                        return f"Added \"{task.title}\" to today's tasks!"
+                        return f'Added "{task.title}" to today\'s tasks!'
                     else:
-                        return f"\"{task.title}\" is already scheduled for today!"
-                else:
-                    status_msg = f"Invalid selection: #{choice}. Please select 1-{len(items)}."
-                    status_style = "red"
-            else:
-                status_msg = "Please enter a valid item number, 't' to toggle, 'r' to rescan, or 'b' to go back."
-                status_style = "yellow"
+                        return f'"{task.title}" is already scheduled for today!'
+                continue
+
+            if k.isdigit():
+                sel_num = int(k)
+                if 1 <= sel_num <= len(items):
+                    selected_item = items[sel_num - 1]
+                    task = self.task_service.get_or_create_filemeta_task(
+                        selected_item, source_name=source.name
+                    )
+                    today_str = datetime.now().date().isoformat()
+                    _, is_new = self.daily_service.add_task_to_date(
+                        task.id, today_str
+                    )
+                    if is_new:
+                        return f'Added "{task.title}" to today\'s tasks!'
+                    else:
+                        return f'"{task.title}" is already scheduled for today!'

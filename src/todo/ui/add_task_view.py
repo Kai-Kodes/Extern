@@ -2,8 +2,7 @@
 
 from typing import Optional
 
-from rich import box
-from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from todo.ui.console import (
@@ -16,7 +15,12 @@ from todo.ui.console import (
 
 
 class AddTaskView:
-    def render(self, status_msg: Optional[str] = None, clear: bool = True) -> None:
+    def render(
+        self,
+        status_msg: Optional[str] = None,
+        selected_idx: int = 0,
+        clear: bool = True,
+    ) -> None:
         if clear:
             clear_viewport()
 
@@ -25,8 +29,23 @@ class AddTaskView:
         if status_msg:
             print_status_message(status_msg)
 
-        console.print("  [bold cyan]1.[/bold cyan] Filemeta       [dim](Import or select from course folders)[/dim]")
-        console.print("  [bold cyan]2.[/bold cyan] Universal task [dim](Pick an existing universal task)[/dim]")
-        console.print("  [bold cyan]3.[/bold cyan] Manual task    [dim](Type a new task)[/dim]\n")
+        options = [
+            ("1.", "Filemeta", "(Import or select from course folders)"),
+            ("2.", "Universal task", "(Pick an existing universal task)"),
+            ("3.", "Manual task", "(Type a new task)"),
+        ]
 
-        render_footer([("1-3", "Select"), ("b", "Back")])
+        table = Table.grid(padding=(0, 1))
+        table.add_column("cursor", justify="right", style="cyan bold", width=2)
+        table.add_column("num", justify="right", style="cyan bold", width=4)
+        table.add_column("name", style="bold white", width=18)
+        table.add_column("desc", style="dim")
+
+        for idx, (num, name, desc) in enumerate(options):
+            cursor = "▶" if idx == selected_idx else " "
+            table.add_row(cursor, num, name, desc)
+
+        console.print(table)
+        console.print()
+
+        render_footer([("↑/↓", "Navigate"), ("Enter / 1-3", "Select"), ("b", "Back")])

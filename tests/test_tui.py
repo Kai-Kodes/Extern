@@ -14,7 +14,14 @@ from todo.services.daily_service import DailyService
 from todo.services.source_service import SourceService
 from todo.services.task_service import TaskService
 from todo.ui.app import TodoApp
-from todo.ui.console import _IN_ALT_SCREEN, alt_screen, enter_alt_screen, exit_alt_screen
+from todo.ui.console import (
+    _IN_ALT_SCREEN,
+    alt_screen,
+    enter_alt_screen,
+    exit_alt_screen,
+    tui_mode,
+)
+from todo.ui.key_reader import Key, KeyReader, key_reader
 
 
 def test_alt_screen_lifecycle():
@@ -107,3 +114,188 @@ def test_delete_source_ui_confirmation():
             app.run()
 
         assert len(app.source_service.get_sources()) == 0
+
+
+def test_tui_mode_lifecycle():
+    """Verify tui_mode enters alt screen and cbreak mode, restoring both on normal exit."""
+    with patch("sys.stdout.isatty", return_value=True), \
+         patch("sys.stdin.isatty", return_value=True), \
+         patch("sys.stdin.fileno", return_value=0), \
+         patch("termios.tcgetattr", return_value=[0, 0, 0, 0, 0, 0, [0]]), \
+         patch("termios.tcsetattr") as mock_setattr, \
+         patch("tty.setcbreak") as mock_cbreak, \
+         patch("todo.ui.console.console.set_alt_screen") as mock_alt, \
+         patch("todo.ui.console.console.show_cursor") as mock_cursor:
+
+        with tui_mode():
+            mock_alt.assert_called_with(True)
+            mock_cursor.assert_called_with(False)
+            mock_cbreak.assert_called_once()
+
+        mock_alt.assert_called_with(False)
+        mock_cursor.assert_called_with(True)
+        mock_setattr.assert_called_once()
+
+
+def test_tui_mode_restores_on_exception():
+    """Verify tui_mode restores terminal even when an unhandled exception occurs."""
+    with patch("sys.stdout.isatty", return_value=True), \
+         patch("sys.stdin.isatty", return_value=True), \
+         patch("sys.stdin.fileno", return_value=0), \
+         patch("termios.tcgetattr", return_value=[0, 0, 0, 0, 0, 0, [0]]), \
+         patch("termios.tcsetattr") as mock_setattr, \
+         patch("tty.setcbreak") as mock_cbreak, \
+         patch("todo.ui.console.console.set_alt_screen") as mock_alt:
+
+        with pytest.raises(ZeroDivisionError):
+            with tui_mode():
+                _ = 1 / 0
+
+        mock_alt.assert_called_with(False)
+        mock_setattr.assert_called_once()
+
+
+def test_key_reader_escape_sequence_parsing():
+    """Verify KeyReader accurately parses ANSI escape sequences into Key constants."""
+    kr = KeyReader()
+    with patch("sys.stdin.isatty", return_value=True), \
+         patch("sys.stdin.fileno", return_value=0), \
+         patch("termios.tcgetattr", return_value=[]), \
+         patch("termios.tcsetattr"), \
+         patch("tty.setcbreak"):
+
+        # 1. ESC [ A -> UP
+        with patch("os.read", side_effect=[b"\x1b", b"[", b"A"]), \
+             patch("select.select", return_value=([0], [], [])):
+            assert kr.read_key() == Key.UP
+
+        # 2. ESC [ B -> DOWN
+        with patch("os.read", side_effect=[b"\x1b", b"[", b"B"]), \
+             patch("select.select", return_value=([0], [], [])):
+            assert kr.read_key() == Key.DOWN
+
+        # 3. ESC [ C -> RIGHT
+        with patch("os.read", side_effect=[b"\x1b", b"[", b"C"]), \
+             patch("select.select", return_value=([0], [], [])):
+            assert kr.read_key() == Key.RIGHT
+
+        # 4. ESC [ D -> LEFT
+        with patch("os.read", side_effect=[b"\x1b", b"[", b"D"]), \
+             patch("select.select", return_value=([0], [], [])):
+            assert kr.read_key() == Key.LEFT
+
+        # 5. SS3 Mode: ESC O A -> UP
+        with patch("os.read", side_effect=[b"\x1b", b"O", b"A"]), \
+             patch("select.select", return_value=([0], [], [])):
+            assert kr.read_key() == Key.UP
+
+        # 6. Standalone ESC key (timeout on select)
+        with patch("os.read", side_effect=[b"\x1b"]), \
+             patch("select.select", return_value=([], [], [])):
+            assert kr.read_key() == Key.ESCAPE
+
+        # 7. Enter: \r and \n
+        with patch("os.read", side_effect=[b"\r"]):
+            assert kr.read_key() == Key.ENTER
+        with patch("os.read", side_effect=[b"\n"]):
+            assert kr.read_key() == Key.ENTER
+
+        # 8. Backspace: \x7f and \x08
+        with patch("os.read", side_effect=[b"\x7f"]):
+            assert kr.read_key() == Key.BACKSPACE
+        with patch("os.read", side_effect=[b"\x08"]):
+            assert kr.read_key() == Key.BACKSPACE
+
+        # 9. Delete: ESC [ 3 ~
+        with patch("os.read", side_effect=[b"\x1b", b"[", b"3", b"~"]), \
+             patch("select.select", return_value=([0], [], [])):
+            assert kr.read_key() == Key.DELETE
+
+        # 10. Space, Tab, Regular chars
+        with patch("os.read", side_effect=[b" "]):
+            assert kr.read_key() == Key.SPACE
+        with patch("os.read", side_effect=[b"\t"]):
+            assert kr.read_key() == Key.TAB
+        with patch("os.read", side_effect=[b"+"]):
+            assert kr.read_key() == "+"
+        with patch("os.read", side_effect=[b"d"]):
+            assert kr.read_key() == "d"
+
+        # 11. Ctrl+C raises KeyboardInterrupt
+        with patch("os.read", side_effect=[b"\x03"]):
+            with pytest.raises(KeyboardInterrupt):
+                kr.read_key()
+
+        # 12. Ctrl+D raises EOFError
+        with patch("os.read", side_effect=[b"\x04"]):
+            with pytest.raises(EOFError):
+                kr.read_key()
+
+
+
+def test_key_reader_read_text_input_pauses_and_resumes():
+    """Verify read_text_input exits cbreak mode, shows cursor, reads input, and restores cbreak."""
+    kr = KeyReader()
+    with patch("sys.stdin.isatty", return_value=True), \
+         patch("sys.stdin.fileno", return_value=0), \
+         patch("termios.tcgetattr", return_value=[]), \
+         patch("termios.tcsetattr") as mock_setattr, \
+         patch("tty.setcbreak") as mock_cbreak, \
+         patch("todo.ui.console.console.show_cursor") as mock_cursor, \
+         patch("todo.ui.console.console.input", return_value="Learn Python") as mock_input:
+
+        kr.enter()
+        assert kr._is_active is True
+
+        res = kr.read_text_input("Task: > ")
+        assert res == "Learn Python"
+
+        mock_input.assert_called_with("Task: > ")
+        mock_cursor.assert_any_call(True)
+        mock_cursor.assert_any_call(False)
+        assert kr._is_active is True
+        kr.exit()
+
+
+def test_arrow_key_navigation_and_toggle_today():
+    """Verify arrow navigation moves selection cursor and Enter toggles task."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        cfg = Config(db_path=db_path)
+        app = TodoApp(cfg)
+
+        from datetime import datetime
+        today_str = datetime.now().date().isoformat()
+        t1 = app.task_service.create_task("Task 1", source_type="manual")
+        t2 = app.task_service.create_task("Task 2", source_type="manual")
+        app.daily_service.add_task_to_date(t1.id, today_str)
+        app.daily_service.add_task_to_date(t2.id, today_str)
+
+        # Sequence:
+        # Start at index 0.
+        # Press Down (moves to index 1).
+        # Press Enter (toggles task 2).
+        # Press Up (moves to index 0).
+        # Press Enter (toggles task 1).
+        # Press q (quits).
+        inputs = ["down\n", "enter\n", "up\n", "enter\n", "q\n"]
+        with patch("sys.stdin", io.StringIO("".join(inputs))):
+            app.run()
+
+        tasks = app.daily_service.get_tasks_for_date(today_str)
+        assert tasks[0].is_completed is True
+        assert tasks[1].is_completed is True
+
+
+def test_add_task_menu_arrow_navigation():
+    """Verify navigating Add Task menu via arrows and Enter."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        cfg = Config(db_path=db_path)
+        app = TodoApp(cfg)
+
+        # Open Add Task (+), Down (moves to Universal task), Enter (opens Universal list), Back (b), Back (b), Quit (q)
+        inputs = ["+\n", "down\n", "enter\n", "b\n", "b\n", "q\n"]
+        with patch("sys.stdin", io.StringIO("".join(inputs))):
+            app.run()
+

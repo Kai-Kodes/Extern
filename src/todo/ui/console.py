@@ -14,6 +14,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from todo.ui.key_reader import Key, KeyReader, key_reader
+
 console = Console()
 
 # Keep track of alt-screen state to ensure restoration on exit
@@ -50,6 +52,13 @@ def alt_screen():
         yield
     finally:
         exit_alt_screen()
+
+
+@contextlib.contextmanager
+def tui_mode():
+    """Context manager combining alternate screen buffer and cbreak keyboard mode."""
+    with alt_screen(), key_reader.active_mode():
+        yield
 
 
 def clear_viewport() -> None:
@@ -109,65 +118,14 @@ def render_progress_bar(completed: int, total: int, width: int = 16) -> str:
 
 def read_key() -> str:
     """
-    Read a single keypress or command.
-    In interactive TTY: reads raw key (including arrows, Enter, single chars).
-    In non-TTY (tests/pipes): reads a line from stdin.
+    Read a single keypress or command via the central KeyReader.
     """
-    if not sys.stdin.isatty():
-        line = sys.stdin.readline()
-        if not line:
-            raise EOFError()
-        return line.strip()
-
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch == "\x1b":  # Escape sequence
-            r, _, _ = select.select([sys.stdin], [], [], 0.05)
-            if r:
-                ch2 = sys.stdin.read(1)
-                if ch2 == "[":
-                    ch3 = sys.stdin.read(1)
-                    if ch3 == "A":
-                        return "up"
-                    elif ch3 == "B":
-                        return "down"
-                    elif ch3 == "C":
-                        return "right"
-                    elif ch3 == "D":
-                        return "left"
-                    return f"esc[{ch3}"
-                return f"esc{ch2}"
-            return "esc"
-        elif ch in ("\r", "\n"):
-            return "enter"
-        elif ch == "\x03":  # Ctrl+C
-            raise KeyboardInterrupt()
-        elif ch == "\x04":  # Ctrl+D
-            raise EOFError()
-        elif ch in ("\x7f", "\x08"):
-            return "backspace"
-        return ch
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    return key_reader.read_key()
 
 
 def prompt_input(prompt_text: str = "> ") -> str:
     """
-    Prompt user for full line input with cursor shown.
-    Handles TTY and non-TTY transparently.
+    Prompt user for full line input with cursor shown via KeyReader.
     """
-    if not sys.stdin.isatty():
-        line = sys.stdin.readline()
-        if not line:
-            raise EOFError()
-        return line.strip()
+    return key_reader.read_text_input(prompt_text)
 
-    console.show_cursor(True)
-    try:
-        val = console.input(prompt_text).strip()
-    finally:
-        console.show_cursor(False)
-    return val

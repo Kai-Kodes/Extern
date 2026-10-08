@@ -2,8 +2,6 @@
 
 from typing import List, Optional
 
-from rich import box
-from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
@@ -15,14 +13,16 @@ from todo.ui.console import (
     console,
     format_today_title,
     print_status_message,
-    prompt_input,
     render_footer,
     render_header,
 )
+from todo.ui.key_reader import Key, key_reader
 
 
 class TodayView:
-    def __init__(self, daily_service: DailyService, task_service: Optional[TaskService] = None):
+    def __init__(
+        self, daily_service: DailyService, task_service: Optional[TaskService] = None
+    ):
         self.daily_service = daily_service
         self.task_service = task_service
 
@@ -76,7 +76,7 @@ class TodayView:
 
             hints = [
                 ("↑/↓", "Navigate"),
-                ("Enter / 1-" + str(len(tasks)), "Toggle"),
+                ("Enter", "Toggle"),
                 ("+", "Add task"),
                 ("d", "Delete"),
                 ("u", "Universal"),
@@ -84,30 +84,55 @@ class TodayView:
             ]
             render_footer(hints)
 
-    def handle_delete(self, tasks: List[DailyTask], current_idx: int = 0) -> Optional[str]:
+    def handle_delete(
+        self, tasks: List[DailyTask], current_idx: int = 0
+    ) -> Optional[str]:
         """Selection-based task deletion workflow respecting task semantics."""
         if not tasks:
             return "No tasks to delete."
 
-        clear_viewport()
-        render_header("DELETE TASK")
-        console.print("Select task to remove from Today:\n")
+        del_idx = current_idx
+        while True:
+            clear_viewport()
+            render_header("DELETE TASK")
+            console.print("Select task to remove from Today:\n")
 
-        for idx, dt in enumerate(tasks, start=1):
-            title = dt.task.title if dt.task else f"Task #{dt.task_id}"
-            src_tag = f"[{dt.task.source_type}]" if dt.task else ""
-            console.print(f"  [bold cyan]{idx}.[/bold cyan] [bold white]{title}[/bold white] [dim]{src_tag}[/dim]")
+            table = Table.grid(padding=(0, 1))
+            table.add_column("cursor", justify="right", style="cyan bold", width=2)
+            table.add_column("num", justify="right", style="cyan bold", width=4)
+            table.add_column("title", style="bold white")
+            table.add_column("tag", style="dim")
 
-        console.print("\n  [bold cyan]\\[b][/bold cyan] Cancel\n")
-        choice = prompt_input(f"Select task [1-{len(tasks)}, b]: ")
+            for idx, dt in enumerate(tasks):
+                cursor = "▶" if idx == del_idx else " "
+                title = dt.task.title if dt.task else f"Task #{dt.task_id}"
+                src_tag = f"[{dt.task.source_type}]" if dt.task else ""
+                table.add_row(cursor, f"{idx + 1}.", title, src_tag)
 
-        if choice.lower() in ("b", "back", "cancel", "q", "quit"):
-            return None
+            console.print(table)
+            console.print()
+            render_footer(
+                [
+                    ("↑/↓", "Navigate"),
+                    ("Enter", "Select"),
+                    ("b", "Cancel"),
+                ]
+            )
 
-        if not choice.isdigit() or not (1 <= int(choice) <= len(tasks)):
-            return "Invalid task selection."
+            k = key_reader.read_key()
+            if k in (Key.ESCAPE, "b", "q", "cancel"):
+                return None
+            elif k == Key.UP:
+                del_idx = max(0, del_idx - 1)
+            elif k == Key.DOWN:
+                del_idx = min(len(tasks) - 1, del_idx + 1)
+            elif k == Key.ENTER:
+                break
+            elif k.isdigit() and 1 <= int(k) <= len(tasks):
+                del_idx = int(k) - 1
+                break
 
-        selected_dt = tasks[int(choice) - 1]
+        selected_dt = tasks[del_idx]
         task = selected_dt.task
         title = task.title if task else f"Task #{selected_dt.task_id}"
 
@@ -116,22 +141,34 @@ class TodayView:
             clear_viewport()
             render_header("DELETE UNIVERSAL TASK", subtitle=title)
             console.print(f"Task: [bold white]{title}[/bold white]\n")
-            console.print("  [bold cyan]1.[/bold cyan] Remove from Today only [dim](keeps in Universal list)[/dim]")
-            console.print("  [bold cyan]2.[/bold cyan] Permanently delete Universal task [dim](removes everywhere)[/dim]\n")
-            console.print("  [bold cyan]\\[b][/bold cyan] Cancel\n")
+            console.print(
+                "  [bold cyan]1.[/bold cyan] Remove from Today only [dim](keeps in Universal list)[/dim]"
+            )
+            console.print(
+                "  [bold cyan]2.[/bold cyan] Permanently delete Universal task [dim](removes everywhere)[/dim]\n"
+            )
+            render_footer([("1", "Remove from Today"), ("2", "Delete permanently"), ("b", "Cancel")])
 
-            sub_choice = prompt_input("Option [1-2, b]: ")
-            if sub_choice == "1":
+            sub_k = key_reader.read_key()
+            if sub_k == "1":
                 self.daily_service.remove_daily_task(selected_dt.id)
-                return f"Removed \"{title}\" from today's schedule."
-            elif sub_choice == "2":
-                confirm = prompt_input(f"Permanently delete \"{title}\" from database? [y/n]: ")
-                if confirm.lower() in ("y", "yes"):
+                return f'Removed "{title}" from today\'s schedule.'
+            elif sub_k == "2":
+                clear_viewport()
+                render_header("CONFIRM PERMANENT DELETE", subtitle=title)
+                console.print(
+                    f"Permanently delete [bold white]\"{title}\"[/bold white] from database?\n"
+                )
+                render_footer([("y", "Yes, delete"), ("n", "Cancel")])
+                conf = key_reader.read_key()
+                if conf.lower() in ("y", "yes", Key.ENTER):
                     if self.task_service:
                         self.task_service.delete_task(task.id)
                     else:
-                        self.daily_service.delete_daily_task_and_underlying(selected_dt.id)
-                    return f"Permanently deleted \"{title}\"."
+                        self.daily_service.delete_daily_task_and_underlying(
+                            selected_dt.id
+                        )
+                    return f'Permanently deleted "{title}".'
                 return "Deletion cancelled."
             return None
 
@@ -139,21 +176,29 @@ class TodayView:
         elif task and task.source_type == "filemeta":
             clear_viewport()
             render_header("REMOVE FROM TODAY", subtitle=title)
-            console.print(f"Remove [bold white]\"{title}\"[/bold white] from today's schedule?")
-            console.print("[dim]The course item and file will remain untouched.[/dim]\n")
-            confirm = prompt_input("[y/n]: ")
-            if confirm.lower() in ("y", "yes"):
+            console.print(
+                f"Remove [bold white]\"{title}\"[/bold white] from today\'s schedule?"
+            )
+            console.print(
+                "[dim]The course item and file will remain untouched.[/dim]\n"
+            )
+            render_footer([("y", "Yes, remove"), ("n", "Cancel")])
+            conf = key_reader.read_key()
+            if conf.lower() in ("y", "yes", Key.ENTER):
                 self.daily_service.remove_daily_task(selected_dt.id)
-                return f"Removed \"{title}\" from today's schedule."
+                return f'Removed "{title}" from today\'s schedule.'
             return "Cancelled."
 
         # 3. Manual task deletion semantics
         else:
             clear_viewport()
             render_header("DELETE TASK", subtitle=title)
-            console.print(f"Delete [bold white]\"{title}\"[/bold white] from today's schedule?\n")
-            confirm = prompt_input("[y/n]: ")
-            if confirm.lower() in ("y", "yes"):
+            console.print(
+                f"Delete [bold white]\"{title}\"[/bold white] from today\'s schedule?\n"
+            )
+            render_footer([("y", "Yes, delete"), ("n", "Cancel")])
+            conf = key_reader.read_key()
+            if conf.lower() in ("y", "yes", Key.ENTER):
                 self.daily_service.delete_daily_task_and_underlying(selected_dt.id)
-                return f"Deleted \"{title}\"."
+                return f'Deleted "{title}".'
             return "Cancelled."
