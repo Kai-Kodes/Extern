@@ -1,8 +1,10 @@
 """Native Telegram integration adapter for Todo CLI."""
 
 import asyncio
+import concurrent.futures
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from todo.integrations.filemeta import FilemetaScanResult, ScannedFile
@@ -107,6 +109,8 @@ class TelegramAdapter:
         self.api_hash = api_hash
         self._client = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.RLock()
 
     def check_availability(self) -> Tuple[bool, Optional[str]]:
         """
@@ -145,42 +149,68 @@ class TelegramAdapter:
 
         return True, None
 
-    def _run_async(self, coro):
-        """Execute an asynchronous coroutine synchronously using the client's loop."""
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        """Ensure a single persistent event loop is running on a dedicated worker thread."""
+        with self._lock:
+            if self._loop is None or self._loop.is_closed():
+                loop = asyncio.new_event_loop()
+                thread = threading.Thread(
+                    target=self._run_event_loop,
+                    args=(loop,),
+                    name="TelegramAdapterLoop",
+                    daemon=True,
+                )
+                thread.start()
+                self._loop = loop
+                self._thread = thread
+            return self._loop
+
+    def _run_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Run the dedicated background event loop until stopped."""
+        asyncio.set_event_loop(loop)
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
+            loop.run_forever()
+        finally:
+            try:
+                pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            loop.close()
 
-        if loop and loop.is_running():
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(asyncio.run, coro).result()
-        return asyncio.run(coro)
+    def _run_async(self, coro, timeout: Optional[float] = 30.0):
+        """Submit an async coroutine to the single persistent event loop and wait for result."""
+        loop = self._ensure_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise TelegramConnectionError("Telegram operation timed out.")
 
     def _get_client(self):
-        """Lazily initialize the Telethon TelegramClient instance."""
-        if self._client is not None:
+        """Lazily initialize the Telethon TelegramClient bound to the persistent loop."""
+        with self._lock:
+            if self._client is not None:
+                return self._client
+
+            from telethon import TelegramClient
+
+            session_str = str(self.session_path)
+            if session_str.endswith(".session"):
+                session_str = session_str[:-8]
+
+            loop = self._ensure_loop()
+            self._client = TelegramClient(session_str, self.api_id, self.api_hash, loop=loop)
             return self._client
-
-        from telethon import TelegramClient
-
-        session_str = str(self.session_path)
-        if session_str.endswith(".session"):
-            session_str = session_str[:-8]
-
-        self._client = TelegramClient(session_str, self.api_id, self.api_hash)
-        return self._client
 
     def connect(self) -> None:
         """
         Connect to Telegram and verify that the session is authorized.
-        Raises:
-            TelegramNotConfiguredError
-            TelegramSessionNotFoundError
-            TelegramUnauthorizedError
-            TelegramConnectionError
+        All operations run on the adapter's persistent event loop.
         """
         ok, err = self.check_availability()
         if not ok:
@@ -212,16 +242,40 @@ class TelegramAdapter:
         self._run_async(_connect_internal())
 
     def disconnect(self) -> None:
-        """Disconnect client cleanly and release resources."""
-        if self._client is not None:
-            async def _disconnect_internal():
-                if self._client.is_connected():
-                    await self._client.disconnect()
+        """Disconnect client cleanly and release loop/thread resources. Safe when called multiple times."""
+        with self._lock:
+            loop = self._loop
+            thread = self._thread
+            client = self._client
+
+            if loop is None or loop.is_closed():
+                self._client = None
+                self._loop = None
+                self._thread = None
+                return
+
+            if client is not None:
+                async def _disconnect_client():
+                    if client.is_connected():
+                        await client.disconnect()
+
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(_disconnect_client(), loop)
+                    fut.result(timeout=3.0)
+                except Exception:
+                    pass
+                finally:
+                    self._client = None
+
             try:
-                self._run_async(_disconnect_internal())
+                loop.call_soon_threadsafe(loop.stop)
+                if thread and thread.is_alive():
+                    thread.join(timeout=2.0)
             except Exception:
                 pass
-            self._client = None
+            finally:
+                self._loop = None
+                self._thread = None
 
     def is_authorized(self) -> bool:
         """Check if the client is currently connected and authorized."""

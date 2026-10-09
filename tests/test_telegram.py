@@ -645,3 +645,108 @@ def test_telegram_rescan_failure_preserves_database():
         items = source_svc.get_items_by_source(source.id)
         assert len(items) == 1
         assert items[0].title == "01 - TCP Handshake"
+
+
+def test_telegram_adapter_lifecycle_same_event_loop():
+    """
+    Regression test for: 'The asyncio event loop must not change after connection'
+    Verifies that connect(), discover_channels(), scan_channel(), and disconnect()
+    all run on the exact same asyncio event loop instance.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".session") as tmp:
+        adapter = TelegramAdapter(
+            session_path=tmp.name,
+            api_id=12345,
+            api_hash="abcdef",
+        )
+
+        observed_loops = []
+
+        class StrictLoopMockClient:
+            def __init__(self, session, api_id, api_hash, loop=None):
+                self._loop = loop
+                self._connected = False
+
+            def is_connected(self):
+                return self._connected
+
+            async def connect(self):
+                current_loop = asyncio.get_running_loop()
+                observed_loops.append(("connect", current_loop))
+                if self._loop is not None and self._loop != current_loop:
+                    raise RuntimeError("The asyncio event loop must not change after connection")
+                self._connected = True
+
+            async def is_user_authorized(self):
+                current_loop = asyncio.get_running_loop()
+                observed_loops.append(("is_user_authorized", current_loop))
+                if self._loop is not None and self._loop != current_loop:
+                    raise RuntimeError("The asyncio event loop must not change after connection")
+                return True
+
+            async def get_dialogs(self, limit=150):
+                current_loop = asyncio.get_running_loop()
+                observed_loops.append(("get_dialogs", current_loop))
+                if self._loop is not None and self._loop != current_loop:
+                    raise RuntimeError("The asyncio event loop must not change after connection")
+                d = MagicMock()
+                d.id = -100111
+                d.name = "Course Channel"
+                d.is_channel = True
+                d.is_group = False
+                d.entity = MagicMock(username="course_channel")
+                return [d]
+
+            async def get_entity(self, channel_id):
+                current_loop = asyncio.get_running_loop()
+                observed_loops.append(("get_entity", current_loop))
+                if self._loop is not None and self._loop != current_loop:
+                    raise RuntimeError("The asyncio event loop must not change after connection")
+                return MagicMock(title="Course Channel")
+
+            async def iter_messages(self, entity, limit=None):
+                current_loop = asyncio.get_running_loop()
+                observed_loops.append(("iter_messages", current_loop))
+                if self._loop is not None and self._loop != current_loop:
+                    raise RuntimeError("The asyncio event loop must not change after connection")
+                msg = MagicMock()
+                msg.id = 1
+                msg.video = MagicMock(attributes=[], size=100)
+                msg.document = None
+                msg.message = "Lesson 1"
+                msg.date = datetime.now()
+                yield msg
+
+            async def disconnect(self):
+                current_loop = asyncio.get_running_loop()
+                observed_loops.append(("disconnect", current_loop))
+                if self._loop is not None and self._loop != current_loop:
+                    raise RuntimeError("The asyncio event loop must not change after connection")
+                self._connected = False
+
+        with patch("telethon.TelegramClient", side_effect=StrictLoopMockClient):
+            # 1. Connect
+            adapter.connect()
+            assert adapter.is_authorized() is True
+
+            # 2. Discover channels (previously raised RuntimeError here!)
+            channels = adapter.discover_channels()
+            assert len(channels) == 1
+            assert channels[0].title == "Course Channel"
+
+            # 3. Scan channel
+            scan_res = adapter.scan_channel(-100111)
+            assert scan_res.source_name == "Course Channel"
+
+            # Verify all calls used the exact same event loop
+            assert len(observed_loops) >= 5
+            first_loop = observed_loops[0][1]
+            for op, loop in observed_loops:
+                assert loop is first_loop, f"Operation {op} ran on a different loop!"
+
+            # 4. Disconnect safely and idempotently
+            adapter.disconnect()
+            adapter.disconnect()
+            assert adapter._loop is None
+            assert adapter._thread is None
+            assert adapter._client is None
