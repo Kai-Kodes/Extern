@@ -326,6 +326,18 @@ class TelegramAdapter:
         """
         self.connect()
 
+        VIDEO_EXTENSIONS = {
+            ".mp4",
+            ".mkv",
+            ".avi",
+            ".mov",
+            ".webm",
+            ".flv",
+            ".m4v",
+            ".ts",
+            ".wmv",
+        }
+
         async def _scan():
             client = self._get_client()
             try:
@@ -367,10 +379,13 @@ class TelegramAdapter:
                         if hasattr(attr, "file_name") and attr.file_name:
                             raw_filename = attr.file_name
 
-                if is_video:
-                    if not raw_filename and msg.file:
-                        raw_filename = msg.file.name
+                if not raw_filename and getattr(msg, "file", None):
+                    raw_filename = msg.file.name
 
+                if raw_filename and Path(raw_filename).suffix.lower() in VIDEO_EXTENSIONS:
+                    is_video = True
+
+                if is_video:
                     clean_title = clean_video_title(
                         raw_filename, caption=msg.message, msg_id=msg.id
                     )
@@ -386,6 +401,7 @@ class TelegramAdapter:
                         "file_name": raw_filename or clean_title,
                         "size": size_bytes,
                         "date": msg.date.isoformat() if msg.date else None,
+                        "message_text": msg.message or "",
                     }
 
                     # Stable unique URI for the item: telegram://{channel_id}/{msg_id}
@@ -410,4 +426,4 @@ class TelegramAdapter:
                 items=items,
             )
 
-        return self._run_async(_scan())
+        return self._run_async(_scan(), timeout=None)

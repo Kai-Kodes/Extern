@@ -296,40 +296,49 @@ class FilemetaView:
                 table.add_column("title")
                 table.add_column("info", style="dim")
 
-                for i, it in enumerate(visible_slice):
-                    actual_i = scroll_offset + i
-                    cursor = "▶" if actual_i == selected_idx else " "
-                    is_selected = it.id in selected_item_ids
-                    chk_text = (
-                        Text("[x]", style="bold cyan")
-                        if is_selected
-                        else Text("[ ]", style="dim")
-                    )
-                    icon = (
-                        Text("✓", style="bold green")
-                        if it.completed
-                        else Text("○", style="bright_yellow")
-                    )
-                    title_style = "green" if it.completed else "bold white"
+            today_str = datetime.now().date().isoformat()
+            today_tasks = self.daily_service.get_tasks_for_date(today_str)
+            scheduled_item_ids = {
+                t.task.source_id
+                for t in today_tasks
+                if t.task.source_type in ("filemeta", "telegram") and t.task.source_id is not None
+            }
 
-                    info_parts = []
-                    if (
-                        "duration_formatted" in it.metadata
-                        and it.metadata["duration_formatted"]
-                    ):
-                        info_parts.append(f"({it.metadata['duration_formatted']})")
-                    elif "pages" in it.metadata and it.metadata["pages"]:
-                        info_parts.append(f"({it.metadata['pages']} pages)")
-                    info_str = " ".join(info_parts)
+            for i, it in enumerate(visible_slice):
+                actual_i = scroll_offset + i
+                cursor = "▶" if actual_i == selected_idx else " "
+                is_selected = it.id in selected_item_ids
+                chk_text = (
+                    Text("[x]", style="bold cyan")
+                    if is_selected
+                    else Text("[ ]", style="dim")
+                )
+                icon = (
+                    Text("✓", style="bold green")
+                    if it.completed
+                    else Text("○", style="bright_yellow")
+                )
+                title_style = "green" if it.completed else "bold white"
 
-                    table.add_row(
-                        cursor,
-                        chk_text,
-                        icon,
-                        f"{actual_i + 1}.",
-                        Text(it.title, style=title_style),
-                        Text(info_str, style="dim green"),
-                    )
+                info_text = Text()
+                if it.id in scheduled_item_ids:
+                    info_text.append("[Today] ", style="bold cyan")
+                if (
+                    "duration_formatted" in it.metadata
+                    and it.metadata["duration_formatted"]
+                ):
+                    info_text.append(f"({it.metadata['duration_formatted']})", style="dim green")
+                elif "pages" in it.metadata and it.metadata["pages"]:
+                    info_text.append(f"({it.metadata['pages']} pages)", style="dim green")
+
+                table.add_row(
+                    cursor,
+                    chk_text,
+                    icon,
+                    f"{actual_i + 1}.",
+                    Text(it.title, style=title_style),
+                    info_text,
+                )
 
                 console.print(table)
                 console.print()

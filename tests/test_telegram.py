@@ -563,7 +563,7 @@ def test_telegram_view_unauthorized_error_screen():
     view = TelegramView(adapter, source_svc, task_svc, daily_svc)
 
     with patch("todo.ui.telegram_view.key_reader.read_key", return_value="b"):
-        result = view.run()
+        result = view.handle_add_channel()
         assert result is None
 
 
@@ -800,3 +800,313 @@ def test_telegram_adapter_lifecycle_same_event_loop():
             assert adapter._loop is None
             assert adapter._thread is None
             assert adapter._client is None
+
+
+def test_telegram_channel_caching_and_fast_reopen():
+    """Channel list is cached in SQLite and loaded instantly in picker without re-fetching."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = Database(db_path)
+        source_svc = SourceService(db)
+        task_svc = TaskService(db)
+        daily_svc = DailyService(db)
+
+        adapter = MagicMock()
+        adapter.check_availability.return_value = (True, None)
+        adapter.discover_channels.return_value = [
+            TelegramChannel(id=-1001, title="Rust Mastery", username="rust_course"),
+            TelegramChannel(id=-1002, title="Go Systems", username="go_course"),
+        ]
+
+        # First open of channel picker (+): cache is empty, adapter.discover_channels must be called
+        view = TelegramView(adapter, source_svc, task_svc, daily_svc)
+        with patch("todo.ui.telegram_view.key_reader.read_key", return_value="b"):
+            view.handle_add_channel()
+
+        assert adapter.discover_channels.call_count == 1
+
+        # Check SQLite database has cached channels
+        cached = source_svc.get_cached_telegram_channels()
+        assert len(cached) == 2
+        assert cached[0].title == "Go Systems"  # Sorted alphabetically
+        assert cached[1].title == "Rust Mastery"
+
+        # Second open of picker (simulating restart):
+        adapter.discover_channels.reset_mock()
+        view2 = TelegramView(adapter, source_svc, task_svc, daily_svc)
+        with patch("todo.ui.telegram_view.key_reader.read_key", return_value="b"):
+            view2.handle_add_channel()
+
+        # MUST NOT call discover_channels again!
+        adapter.discover_channels.assert_not_called()
+
+        # Refresh with 'r' should call discover_channels and update cache
+        adapter.discover_channels.return_value = [
+            TelegramChannel(id=-1001, title="Rust Mastery", username="rust_course"),
+            TelegramChannel(id=-1002, title="Go Systems", username="go_course"),
+            TelegramChannel(id=-1003, title="Linux Admin", username="linux_course"),
+        ]
+        with patch("todo.ui.telegram_view.key_reader.read_key", side_effect=["r", "b"]):
+            view2.handle_add_channel()
+
+        assert adapter.discover_channels.call_count == 1
+        cached_after_r = source_svc.get_cached_telegram_channels()
+        assert len(cached_after_r) == 3
+
+
+def test_telegram_home_screen_imported_channels_only():
+    """Telegram home screen shows only imported channels from SQLite without any network calls."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = Database(db_path)
+        source_svc = SourceService(db)
+        task_svc = TaskService(db)
+        daily_svc = DailyService(db)
+
+        # 1. When no channels imported, shows empty state
+        adapter = MagicMock()
+        view = TelegramView(adapter, source_svc, task_svc, daily_svc)
+        with patch("todo.ui.telegram_view.key_reader.read_key", return_value="b"):
+            view.run()
+
+        # Network/Telegram client is NEVER touched on home screen!
+        adapter.connect.assert_not_called()
+        adapter.discover_channels.assert_not_called()
+
+        # 2. Add an imported source
+        scan = FilemetaScanResult(
+            source_name="PostgreSQL Internals",
+            source_path="telegram://-100777",
+            items=[
+                ScannedFile(
+                    name="01_WAL.mp4",
+                    path="telegram://-100777/1",
+                    title="01 - Write Ahead Logging",
+                    type="video",
+                    metadata={"duration_formatted": "18:20", "message_id": 1},
+                )
+            ],
+        )
+        source_svc.add_or_update_source(scan)
+
+        # Open home screen: must display imported channel, pressing Enter opens lessons, then 'b' exits
+        with patch("todo.ui.telegram_view.key_reader.read_key", side_effect=[Key.ENTER, "b", "b"]):
+            view.run()
+
+        # Still zero network calls because lessons were opened directly from SQLite!
+        adapter.scan_channel.assert_not_called()
+        adapter.discover_channels.assert_not_called()
+
+
+def test_telegram_add_new_channel_with_plus():
+    """Pressing '+' on Telegram home screen opens channel picker, imports selected channel and returns."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = Database(db_path)
+        source_svc = SourceService(db)
+        task_svc = TaskService(db)
+        daily_svc = DailyService(db)
+
+        adapter = MagicMock()
+        adapter.check_availability.return_value = (True, None)
+        adapter.discover_channels.return_value = [
+            TelegramChannel(id=-100333, title="Kubernetes Deep Dive"),
+        ]
+        adapter.scan_channel.return_value = FilemetaScanResult(
+            source_name="Kubernetes Deep Dive",
+            source_path="telegram://-100333",
+            items=[
+                ScannedFile(
+                    name="01_Pods.mp4",
+                    path="telegram://-100333/1",
+                    title="01 - Pods and Services",
+                    type="video",
+                    metadata={"duration_formatted": "15:00", "message_id": 1},
+                )
+            ],
+        )
+
+        view = TelegramView(adapter, source_svc, task_svc, daily_svc)
+
+        # Home screen starts empty.
+        # Key sequence:
+        # '+' -> opens handle_add_channel
+        # Key.ENTER -> selects 'Kubernetes Deep Dive', imports it, opens lesson browser
+        # 'b' -> exits lesson browser to home screen
+        # 'b' -> exits home screen
+        with patch("todo.ui.telegram_view.key_reader.read_key", side_effect=["+", Key.ENTER, "b", "b"]):
+            view.run()
+
+        # Channel was imported into SQLite!
+        sources = source_svc.get_sources(source_type="telegram")
+        assert len(sources) == 1
+        assert sources[0].name == "Kubernetes Deep Dive"
+        assert sources[0].item_count == 1
+
+
+def test_telegram_add_channel_picker_select_existing_opens_without_rescan():
+    """Selecting an already imported channel in the picker opens its cached lessons without rescanning."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = Database(db_path)
+        source_svc = SourceService(db)
+        task_svc = TaskService(db)
+        daily_svc = DailyService(db)
+
+        # Pre-import channel
+        scan = FilemetaScanResult(
+            source_name="C++ Performance",
+            source_path="telegram://-100444",
+            items=[
+                ScannedFile(
+                    name="01_Memory.mp4",
+                    path="telegram://-100444/1",
+                    title="01 - Memory Layout",
+                    type="video",
+                    metadata={"duration_formatted": "20:00", "message_id": 1},
+                )
+            ],
+        )
+        source_svc.add_or_update_source(scan)
+
+        # Cache includes the pre-imported channel
+        source_svc.save_cached_telegram_channels([
+            TelegramChannel(id=-100444, title="C++ Performance")
+        ])
+
+        adapter = MagicMock()
+        adapter.check_availability.return_value = (True, None)
+
+        view = TelegramView(adapter, source_svc, task_svc, daily_svc)
+
+        # In channel picker: press Enter to select already-imported channel, then 'b' to exit lesson view
+        with patch("todo.ui.telegram_view.key_reader.read_key", side_effect=[Key.ENTER, "b"]):
+            view.handle_add_channel()
+
+        # scan_channel must NOT have been called!
+        adapter.scan_channel.assert_not_called()
+
+
+def test_telegram_home_source_removal():
+    """Pressing 'd' on Telegram home screen deletes the selected imported source from Todo."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = Database(db_path)
+        source_svc = SourceService(db)
+        task_svc = TaskService(db)
+        daily_svc = DailyService(db)
+
+        scan = FilemetaScanResult(
+            source_name="Old Course",
+            source_path="telegram://-100111",
+            items=[
+                ScannedFile(
+                    name="01_Intro.mp4",
+                    path="telegram://-100111/1",
+                    title="01 - Intro",
+                    type="video",
+                    metadata={"message_id": 1},
+                )
+            ],
+        )
+        source_svc.add_or_update_source(scan)
+        assert len(source_svc.get_sources(source_type="telegram")) == 1
+
+        adapter = MagicMock()
+        view = TelegramView(adapter, source_svc, task_svc, daily_svc)
+
+        # On home screen: press 'd' (delete), 'Enter' to select, 'y' to confirm, then 'b' to exit
+        with patch("todo.ui.telegram_view.key_reader.read_key", side_effect=["d", Key.ENTER, "y", "b"]):
+            view.run()
+
+        # Source deleted from SQLite!
+        assert len(source_svc.get_sources(source_type="telegram")) == 0
+
+
+def test_telegram_persistence_across_app_restarts():
+    """Imported channels persist across application restarts and open instantly."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = Database(db_path)
+        source_svc = SourceService(db)
+        task_svc = TaskService(db)
+        daily_svc = DailyService(db)
+
+        # 1. Import channel
+        scan = FilemetaScanResult(
+            source_name="Distributed Consensus",
+            source_path="telegram://-100555",
+            items=[
+                ScannedFile(
+                    name="01_Paxos.mp4",
+                    path="telegram://-100555/1",
+                    title="01 - Paxos Made Simple",
+                    type="video",
+                    metadata={"duration_formatted": "30:00", "message_id": 1},
+                )
+            ],
+        )
+        source_svc.add_or_update_source(scan)
+
+        # 2. Simulate application restart with a fresh Database and SourceService instance pointing to same file
+        db2 = Database(db_path)
+        source_svc2 = SourceService(db2)
+        task_svc2 = TaskService(db2)
+        daily_svc2 = DailyService(db2)
+
+        adapter2 = MagicMock()
+        adapter2.check_availability.return_value = (True, None)
+        view2 = TelegramView(adapter2, source_svc2, task_svc2, daily_svc2)
+
+        # Open home screen, press Enter to open lessons, 'b' to exit lessons, 'b' to exit home
+        with patch("todo.ui.telegram_view.key_reader.read_key", side_effect=[Key.ENTER, "b", "b"]):
+            view2.run()
+
+        # Lessons were loaded directly from SQLite! Zero network calls
+        adapter2.scan_channel.assert_not_called()
+        adapter2.discover_channels.assert_not_called()
+
+
+def test_telegram_video_extension_document_detection():
+    """Video files sent as documents with video extensions are detected as videos."""
+    with tempfile.NamedTemporaryFile(suffix=".session") as tmp:
+        adapter = TelegramAdapter(
+            session_path=tmp.name,
+            api_id=12345,
+            api_hash="abcdef",
+        )
+
+        mock_entity = MagicMock()
+        mock_entity.title = "Video Attachments Course"
+
+        # msg with document, mime_type='application/octet-stream', but filename is .mkv
+        attr_file = type("AttrFile", (), {"file_name": "Lesson_03_Advanced_IPC.mkv"})()
+        msg1 = MagicMock()
+        msg1.id = 55
+        msg1.video = None
+        msg1.document = MagicMock(
+            mime_type="application/octet-stream",
+            attributes=[attr_file],
+            size=12345678,
+        )
+        msg1.file = None
+        msg1.message = "Lesson 3 on IPC"
+        msg1.date = datetime(2026, 10, 5, 12, 0, 0)
+
+        async def mock_iter_messages(entity, limit=None):
+            yield msg1
+
+        mock_client = MagicMock()
+        mock_client.is_connected.return_value = True
+        mock_client.is_user_authorized = AsyncMock(return_value=True)
+        mock_client.get_entity = AsyncMock(return_value=mock_entity)
+        mock_client.iter_messages = mock_iter_messages
+
+        with patch.object(adapter, "_get_client", return_value=mock_client):
+            scan_res = adapter.scan_channel(-100555)
+
+            assert len(scan_res.items) == 1
+            item = scan_res.items[0]
+            assert item.title == "Lesson_03_Advanced_IPC"
+            assert item.metadata["message_text"] == "Lesson 3 on IPC"
+

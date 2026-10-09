@@ -56,6 +56,17 @@ CREATE TABLE IF NOT EXISTS daily_tasks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_daily_tasks_date ON daily_tasks(date);
+
+CREATE TABLE IF NOT EXISTS telegram_channels_cache (
+    id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
+    username TEXT,
+    is_channel INTEGER NOT NULL DEFAULT 1,
+    is_group INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_telegram_cache_title ON telegram_channels_cache(title);
 """
 
 

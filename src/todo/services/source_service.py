@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple
 
 from todo.database import Database
 from todo.integrations.filemeta import FilemetaScanResult, ScannedFile
+from todo.integrations.telegram import TelegramChannel
 from todo.models import FileItem, Source
 
 
@@ -403,3 +404,60 @@ class SourceService:
             conn.commit()
 
         return deleted
+
+    def get_cached_telegram_channels(self) -> List[TelegramChannel]:
+        """Retrieve all locally cached Telegram channels ordered alphabetically by title."""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, title, username, is_channel, is_group
+                FROM telegram_channels_cache
+                ORDER BY title COLLATE NOCASE ASC
+                """
+            )
+            rows = cursor.fetchall()
+
+        return [
+            TelegramChannel(
+                id=r["id"],
+                title=r["title"],
+                username=r["username"],
+                is_channel=bool(r["is_channel"]),
+                is_group=bool(r["is_group"]),
+            )
+            for r in rows
+        ]
+
+    def save_cached_telegram_channels(self, channels: List[TelegramChannel]) -> None:
+        """Replace or update locally cached Telegram channels in SQLite."""
+        now = datetime.now().isoformat()
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM telegram_channels_cache")
+            cursor.executemany(
+                """
+                INSERT INTO telegram_channels_cache (id, title, username, is_channel, is_group, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        c.id,
+                        c.title,
+                        c.username,
+                        1 if c.is_channel else 0,
+                        1 if c.is_group else 0,
+                        now,
+                    )
+                    for c in channels
+                ],
+            )
+            conn.commit()
+
+    def clear_cached_telegram_channels(self) -> None:
+        """Purge all cached Telegram channels from SQLite."""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM telegram_channels_cache")
+            conn.commit()
+
