@@ -96,21 +96,26 @@ class SourceService:
         )
         return source, added_count, updated_count
 
-    def get_sources(self) -> List[Source]:
+    def get_sources(self, source_type: Optional[str] = None) -> List[Source]:
         """Retrieve all imported sources with their item counts and completion stats."""
+        query = """
+            SELECT s.id, s.name, s.path, s.created_at, s.updated_at,
+                   COUNT(fi.id) AS item_count,
+                   COALESCE(SUM(CASE WHEN fi.completed = 1 THEN 1 ELSE 0 END), 0) AS completed_count
+            FROM sources s
+            LEFT JOIN file_items fi ON fi.source_id = s.id
+        """
+        params = []
+        if source_type == "filemeta":
+            query += " WHERE s.path NOT LIKE 'telegram://%'"
+        elif source_type == "telegram":
+            query += " WHERE s.path LIKE 'telegram://%'"
+
+        query += " GROUP BY s.id ORDER BY s.name ASC"
+
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT s.id, s.name, s.path, s.created_at, s.updated_at,
-                       COUNT(fi.id) AS item_count,
-                       COALESCE(SUM(CASE WHEN fi.completed = 1 THEN 1 ELSE 0 END), 0) AS completed_count
-                FROM sources s
-                LEFT JOIN file_items fi ON fi.source_id = s.id
-                GROUP BY s.id
-                ORDER BY s.name ASC
-                """
-            )
+            cursor.execute(query, params)
             rows = cursor.fetchall()
 
         return [
@@ -125,6 +130,37 @@ class SourceService:
             )
             for r in rows
         ]
+
+    def get_source_by_path(self, path: str) -> Optional[Source]:
+        """Retrieve a source by path/URI."""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT s.id, s.name, s.path, s.created_at, s.updated_at,
+                       COUNT(fi.id) AS item_count,
+                       COALESCE(SUM(CASE WHEN fi.completed = 1 THEN 1 ELSE 0 END), 0) AS completed_count
+                FROM sources s
+                LEFT JOIN file_items fi ON fi.source_id = s.id
+                WHERE s.path = ?
+                GROUP BY s.id
+                """,
+                (path,),
+            )
+            r = cursor.fetchone()
+
+        if not r:
+            return None
+
+        return Source(
+            id=r["id"],
+            name=r["name"],
+            path=r["path"],
+            created_at=r["created_at"],
+            updated_at=r["updated_at"],
+            item_count=r["item_count"],
+            completed_count=r["completed_count"],
+        )
 
     def get_source_by_id(self, source_id: int) -> Optional[Source]:
         """Retrieve a source by ID."""
@@ -309,7 +345,7 @@ class SourceService:
             # Two-way sync: update associated task if it exists
             new_status = "completed" if new_completed else "pending"
             cursor.execute(
-                "SELECT id FROM tasks WHERE source_type = 'filemeta' AND source_id = ?",
+                "SELECT id FROM tasks WHERE source_type IN ('filemeta', 'telegram') AND source_id = ?",
                 (item_id,),
             )
             tasks = cursor.fetchall()
@@ -344,9 +380,9 @@ class SourceService:
 
     def delete_source(self, source_id: int) -> bool:
         """
-        Delete a Filemeta source from the Todo database.
+        Delete a Filemeta or Telegram source from the Todo database.
         Cleans up FileItems in SQLite and unlinks tasks without deleting user tasks.
-        NEVER touches or deletes anything from the filesystem.
+        NEVER touches or deletes anything from the filesystem or Telegram.
         """
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
@@ -355,7 +391,7 @@ class SourceService:
                 """
                 UPDATE tasks
                 SET source_id = NULL
-                WHERE source_type = 'filemeta'
+                WHERE source_type IN ('filemeta', 'telegram')
                   AND source_id IN (SELECT id FROM file_items WHERE source_id = ?)
                 """,
                 (source_id,),

@@ -179,15 +179,15 @@ class TodayView:
                 return None
             return None
 
-        # 2. Filemeta task deletion semantics
-        elif task and task.source_type == "filemeta":
+        # 2. Filemeta / Telegram task deletion semantics
+        elif task and task.source_type in ("filemeta", "telegram"):
             clear_viewport()
             render_header("REMOVE FROM TODAY", subtitle=title)
             console.print(
                 f"Remove [bold white]\"{title}\"[/bold white] from today\'s schedule?"
             )
             console.print(
-                "[dim]The course item and file will remain untouched.[/dim]\n"
+                "[dim]The course item will remain untouched.[/dim]\n"
             )
             render_footer([("y", "Yes, remove"), ("n", "Cancel")])
             conf = key_reader.read_key()

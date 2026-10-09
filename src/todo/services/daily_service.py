@@ -172,7 +172,7 @@ class DailyService:
             conn.commit()
 
         # Two-way sync: if originated from a FileItem, update its completed state
-        if source_type == "filemeta" and source_id:
+        if source_type in ("filemeta", "telegram") and source_id:
             from todo.services.source_service import SourceService
             SourceService(self.db).set_item_completion(source_id, is_completed)
 

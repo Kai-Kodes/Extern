@@ -7,6 +7,7 @@ from typing import Optional
 from todo.config import Config
 from todo.database import Database
 from todo.integrations.filemeta import FilemetaAdapter
+from todo.integrations.telegram import TelegramAdapter
 from todo.services.daily_service import DailyService
 from todo.services.source_service import SourceService
 from todo.services.task_service import TaskService
@@ -20,6 +21,7 @@ from todo.ui.console import (
 from todo.ui.filemeta_view import FilemetaView
 from todo.ui.key_reader import Key, key_reader
 from todo.ui.manual_view import ManualView
+from todo.ui.telegram_view import TelegramView
 from todo.ui.today_view import TodayView
 from todo.ui.universal_view import UniversalView
 
@@ -32,6 +34,11 @@ class TodoApp:
         self.task_service = TaskService(self.db)
         self.daily_service = DailyService(self.db)
         self.filemeta_adapter = FilemetaAdapter(self.config.filemeta_command)
+        self.telegram_adapter = TelegramAdapter(
+            self.config.telegram_session_path,
+            self.config.telegram_api_id,
+            self.config.telegram_api_hash,
+        )
 
         self.today_view = TodayView(self.daily_service, self.task_service)
         self.add_task_view = AddTaskView()
@@ -41,13 +48,22 @@ class TodoApp:
             self.daily_service,
             self.filemeta_adapter,
         )
+        self.telegram_view = TelegramView(
+            self.telegram_adapter,
+            self.source_service,
+            self.task_service,
+            self.daily_service,
+        )
         self.universal_view = UniversalView(self.task_service, self.daily_service)
         self.manual_view = ManualView(self.task_service, self.daily_service)
 
     def run(self) -> None:
         """Run the main interactive application loop inside the alternate terminal screen."""
-        with tui_mode():
-            self._main_loop()
+        try:
+            with tui_mode():
+                self._main_loop()
+        finally:
+            self.telegram_adapter.disconnect()
 
     def _main_loop(self) -> None:
         status_msg: Optional[str] = None
@@ -116,6 +132,10 @@ class TodoApp:
                     self.filemeta_view.run()
                     continue
 
+                if choice.lower() in ("t", "tg", "telegram"):
+                    self.telegram_view.run()
+                    continue
+
                 if choice.isdigit() and tasks:
                     idx = int(choice)
                     if 1 <= idx <= len(tasks):
@@ -151,24 +171,28 @@ class TodoApp:
                 continue
 
             if choice in (Key.DOWN, "down"):
-                selected_idx = min(2, selected_idx + 1)
+                selected_idx = min(3, selected_idx + 1)
                 continue
 
             if choice in (Key.ENTER, "enter"):
                 choice = str(selected_idx + 1)
 
-            if choice == "1":
+            if choice in ("1", "f"):
                 self.filemeta_view.run()
                 return None
 
-            elif choice == "2":
+            elif choice in ("2", "u"):
                 self.universal_view.run(select_mode=True)
                 return None
 
-            elif choice == "3":
+            elif choice in ("3", "m"):
                 self.manual_view.run()
                 return None
 
+            elif choice in ("4", "t", "tg"):
+                self.telegram_view.run()
+                return None
+
             else:
-                add_status = "Invalid option. Please choose 1, 2, 3, or 'b' to go back."
+                add_status = "Invalid option. Please choose 1, 2, 3, 4, or 'b' to go back."
 

@@ -43,7 +43,7 @@ class FilemetaView:
 
         while True:
             clear_viewport()
-            sources = self.source_service.get_sources()
+            sources = self.source_service.get_sources(source_type="filemeta")
             render_header("FILEMETA SOURCES")
 
             if status_msg:

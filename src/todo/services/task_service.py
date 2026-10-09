@@ -100,12 +100,15 @@ class TaskService:
             for r in rows
         ]
 
-    def get_or_create_filemeta_task(
-        self, file_item: FileItem, source_name: str = ""
+    def get_or_create_source_task(
+        self,
+        file_item: FileItem,
+        source_name: str = "",
+        source_type: str = "filemeta",
     ) -> Task:
         """
-        Get an existing task for a Filemeta item, or create a new one.
-        Ensures a single task entity per filemeta item.
+        Get an existing task for a Filemeta or Telegram item, or create a new one.
+        Ensures a single task entity per source item.
         """
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
@@ -113,9 +116,9 @@ class TaskService:
                 """
                 SELECT id, title, description, source_type, source_id, status, created_at, updated_at
                 FROM tasks
-                WHERE source_type = 'filemeta' AND source_id = ?
+                WHERE source_type = ? AND source_id = ?
                 """,
-                (file_item.id,),
+                (source_type, file_item.id),
             )
             row = cursor.fetchone()
 
@@ -136,9 +139,25 @@ class TaskService:
         return self.create_task(
             title=file_item.title,
             description=desc,
-            source_type="filemeta",
+            source_type=source_type,
             source_id=file_item.id,
             status=initial_status,
+        )
+
+    def get_or_create_filemeta_task(
+        self, file_item: FileItem, source_name: str = ""
+    ) -> Task:
+        """Alias for backward compatibility."""
+        return self.get_or_create_source_task(
+            file_item, source_name=source_name, source_type="filemeta"
+        )
+
+    def get_or_create_telegram_task(
+        self, file_item: FileItem, source_name: str = ""
+    ) -> Task:
+        """Get or create task for a Telegram lesson."""
+        return self.get_or_create_source_task(
+            file_item, source_name=source_name, source_type="telegram"
         )
 
     def update_task_status(self, task_id: int, status: str) -> None:
@@ -158,7 +177,7 @@ class TaskService:
             )
             conn.commit()
 
-        if row and row["source_type"] == "filemeta" and row["source_id"]:
+        if row and row["source_type"] in ("filemeta", "telegram") and row["source_id"]:
             from todo.services.source_service import SourceService
 
             SourceService(self.db).set_item_completion(

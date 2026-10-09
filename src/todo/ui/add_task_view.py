@@ -33,6 +33,7 @@ class AddTaskView:
             ("1.", "Filemeta", "(Import or select from course folders)"),
             ("2.", "Universal task", "(Pick an existing universal task)"),
             ("3.", "Manual task", "(Type a new task)"),
+            ("4.", "Telegram", "(Browse channels and course videos)"),
         ]
 
         table = Table.grid(padding=(0, 1))
@@ -48,4 +49,4 @@ class AddTaskView:
         console.print(table)
         console.print()
 
-        render_footer([("↑/↓", "Navigate"), ("Enter / 1-3", "Select"), ("b", "Back")])
+        render_footer([("↑/↓", "Navigate"), ("Enter / 1-4", "Select"), ("b", "Back")])

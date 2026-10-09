@@ -16,6 +16,12 @@ class Source:
     completed_count: int = 0
 
     @property
+    def source_type(self) -> str:
+        if self.path.startswith("telegram://"):
+            return "telegram"
+        return "filemeta"
+
+    @property
     def progress_pct(self) -> int:
         if self.item_count <= 0:
             return 0
