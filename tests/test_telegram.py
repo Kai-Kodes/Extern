@@ -133,7 +133,7 @@ def test_telegram_adapter_connect_network_failure():
 
 
 def test_telegram_adapter_discover_channels():
-    """Discover channels retrieves and filters channels and groups properly."""
+    """Discover channels retrieves and filters channels and groups properly without truncation."""
     with tempfile.NamedTemporaryFile(suffix=".session") as tmp:
         adapter = TelegramAdapter(
             session_path=tmp.name,
@@ -142,42 +142,92 @@ def test_telegram_adapter_discover_channels():
         )
 
         # Mock dialogs
+        # 1. Public broadcast channel
         d1 = MagicMock()
         d1.id = -100111
         d1.name = "Linux Kernel Networking"
         d1.is_channel = True
         d1.is_group = False
+        d1.archived = False
         d1.entity = MagicMock(username="linux_net")
 
+        # 2. Private broadcast channel (no username)
         d2 = MagicMock()
         d2.id = -100222
-        d2.name = "Algorithms Masterclass"
+        d2.name = "Private Paid Course Channel"
         d2.is_channel = True
         d2.is_group = False
-        d2.entity = MagicMock(username="algo_master")
+        d2.archived = False
+        d2.entity = MagicMock(username=None)
 
+        # 3. Private supergroup / megagroup (no username)
         d3 = MagicMock()
-        d3.id = 555
-        d3.name = "John Doe (Direct Chat)"
-        d3.is_channel = False
-        d3.is_group = False
-        d3.entity = MagicMock(username="johndoe")
+        d3.id = -100333
+        d3.name = "Private Discussion Supergroup"
+        d3.is_channel = True
+        d3.is_group = True
+        d3.archived = False
+        d3.entity = MagicMock(username=None)
+
+        # 4. Basic group (Chat)
+        d4 = MagicMock()
+        d4.id = -444
+        d4.name = "Study Group Basic Chat"
+        d4.is_channel = False
+        d4.is_group = True
+        d4.archived = False
+        d4.entity = MagicMock(username=None)
+
+        # 5. Archived channel
+        d5 = MagicMock()
+        d5.id = -100555
+        d5.name = "Archived Course Archive"
+        d5.is_channel = True
+        d5.is_group = False
+        d5.archived = True
+        d5.entity = MagicMock(username="archived_course")
+
+        # 6. Direct 1-on-1 user chat (must be filtered out)
+        d6 = MagicMock()
+        d6.id = 666
+        d6.name = "John Doe (Direct Chat)"
+        d6.is_channel = False
+        d6.is_group = False
+        d6.archived = False
+        d6.entity = MagicMock(username="johndoe")
+
+        # 7. Bot chat (must be filtered out)
+        d7 = MagicMock()
+        d7.id = 777
+        d7.name = "Helper Bot"
+        d7.is_channel = False
+        d7.is_group = False
+        d7.archived = False
+        d7.entity = MagicMock(username="helperbot")
 
         mock_client = MagicMock()
         mock_client.is_connected.return_value = True
         mock_client.is_user_authorized = AsyncMock(return_value=True)
-        mock_client.get_dialogs = AsyncMock(return_value=[d1, d2, d3])
+        mock_client.get_dialogs = AsyncMock(return_value=[d1, d2, d3, d4, d5, d6, d7])
 
         with patch.object(adapter, "_get_client", return_value=mock_client):
             channels = adapter.discover_channels()
 
-            # Direct chat (d3) must be filtered out
-            assert len(channels) == 2
-            # Alphabetically sorted: "Algorithms Masterclass" first, then "Linux Kernel Networking"
-            assert channels[0].title == "Algorithms Masterclass"
-            assert channels[0].id == -100222
-            assert channels[1].title == "Linux Kernel Networking"
-            assert channels[1].id == -100111
+            # Must call get_dialogs with limit=None so no channels are truncated
+            mock_client.get_dialogs.assert_called_with(limit=None)
+
+            # Direct chat (d6) and bot (d7) must be filtered out; 5 channels/groups retained
+            assert len(channels) == 5
+
+            titles = [c.title for c in channels]
+            assert "Linux Kernel Networking" in titles
+            assert "Private Paid Course Channel" in titles
+            assert "Private Discussion Supergroup" in titles
+            assert "Study Group Basic Chat" in titles
+            assert "Archived Course Archive" in titles
+
+            # Verify alphabetical sorting
+            assert titles == sorted(titles, key=lambda s: s.lower())
 
 
 def test_telegram_adapter_scan_channel():

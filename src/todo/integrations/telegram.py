@@ -285,10 +285,11 @@ class TelegramAdapter:
         except Exception:
             return False
 
-    def discover_channels(self, limit: int = 150) -> List[TelegramChannel]:
+    def discover_channels(self, limit: Optional[int] = None) -> List[TelegramChannel]:
         """
         Discover channels and groups available to the Telegram account.
-        Filters out 1-on-1 chats and bots.
+        Retrieves all accessible dialogs (including archived and private channels/groups)
+        while filtering out 1-on-1 chats and bots.
         """
         self.connect()
 
