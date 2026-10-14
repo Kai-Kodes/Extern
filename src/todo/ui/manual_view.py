@@ -86,7 +86,7 @@ class ManualView:
                 source_type="manual",
                 status="pending",
             )
-            today_str = datetime.now().date().isoformat()
+            today_str = self.daily_service.get_today_str()
             self.daily_service.add_task_to_date(task.id, today_str)
             return None
         else:

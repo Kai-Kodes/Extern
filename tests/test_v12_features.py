@@ -211,10 +211,10 @@ def test_multi_select_and_search_integration():
         src, _, _ = app.source_service.add_or_update_source(scan)
         today_str = datetime.now().date().isoformat()
 
-        # Open course, search "network", select result with Space, press Enter
+        # Open course, search "network", exit search mode with Enter, select result with Space, press Enter to add
         inputs = [
             "+\n", "1\n", "1\n",
-            "/\n", "network\n",
+            "/\n", "network\n", "enter\n",
             "space\n",
             "enter\n",
             "q\n",
@@ -250,8 +250,8 @@ def test_global_silence_on_source_deletion():
         app.source_service.add_or_update_source(scan)
         assert len(app.source_service.get_sources()) == 1
 
-        # Delete source: "+" -> "1" (Filemeta) -> "d" -> "1" -> "y" (confirm) -> "b" -> "q"
-        inputs = ["+\n", "1\n", "d\n", "1\n", "y\n", "b\n", "q\n"]
+        # Delete source: "+" -> "1" (Filemeta) -> "d" -> "space" (select) -> "enter" (confirm selection) -> "y" (confirm) -> "b" -> "q"
+        inputs = ["+\n", "1\n", "d\n", "space\n", "enter\n", "y\n", "b\n", "q\n"]
         with patch("sys.stdin", io.StringIO("".join(inputs))), console.capture() as capture:
             app.run()
         out = capture.get()
@@ -280,8 +280,8 @@ def test_global_silence_on_universal_task_operations():
         assert "Created" not in out_create
         assert len(app.task_service.get_universal_tasks()) == 1
 
-        # 2. Delete universal task: "u" -> "d" -> "1" -> "y" -> "b" -> "q"
-        inputs_delete = ["u\n", "d\n", "1\n", "y\n", "b\n", "q\n"]
+        # 2. Delete universal task: "u" -> "d" -> "space" (select) -> "enter" (confirm selection) -> "y" (confirm) -> "b" -> "q"
+        inputs_delete = ["u\n", "d\n", "space\n", "enter\n", "y\n", "b\n", "q\n"]
         with patch("sys.stdin", io.StringIO("".join(inputs_delete))), console.capture() as capture:
             app.run()
         out_delete = capture.get()
@@ -298,8 +298,8 @@ def test_global_silence_on_manual_task_creation():
         cfg = Config(db_path=db_path)
         app = TodoApp(cfg)
 
-        # "+" -> "3" (Manual) -> "Buy groceries" -> "1" (Today) -> "q"
-        inputs = ["+\n", "3\n", "Buy groceries\n", "1\n", "q\n"]
+        # "+" -> "5" (Manual) -> "Buy groceries" -> "1" (Today) -> "q"
+        inputs = ["+\n", "5\n", "Buy groceries\n", "1\n", "q\n"]
         with patch("sys.stdin", io.StringIO("".join(inputs))), console.capture() as capture:
             app.run()
         out = capture.get()

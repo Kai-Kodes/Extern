@@ -71,3 +71,6 @@ htmlcov/
 # OS artifacts
 .DS_Store
 Thumbs.db
+
+# Agent & Planning artifacts
+docs/superpowers/

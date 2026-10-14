@@ -76,8 +76,8 @@ def test_today_delete_universal_semantics():
         today_str = datetime.now().date().isoformat()
         dt, _ = app.daily_service.add_task_to_date(u_task.id, today_str)
 
-        # 2. In TUI: press "d" (delete), "1" (select task 1), "1" (Remove from Today only), "q" (quit)
-        inputs = ["d\n", "1\n", "1\n", "q\n"]
+        # 2. In TUI Today: press "d" (delete mode), "space" (select), "enter" (confirm selection), "y" (confirm delete), "q" (quit)
+        inputs = ["d\n", "space\n", "enter\n", "y\n", "q\n"]
         with patch("sys.stdin", io.StringIO("".join(inputs))):
             app.run()
 
@@ -85,14 +85,12 @@ def test_today_delete_universal_semantics():
         assert len(app.daily_service.get_tasks_for_date(today_str)) == 0
         assert app.task_service.get_task_by_id(u_task.id) is not None
 
-        # 3. Re-add to today, then permanently delete via option 2
-        app.daily_service.add_task_to_date(u_task.id, today_str)
-        # "d", "1", "2" (Permanently delete), "y" (confirm), "q"
-        inputs_perm = ["d\n", "1\n", "2\n", "y\n", "q\n"]
+        # 3. Permanently delete via Universal Tasks view
+        # "u" (Universal), "d" (delete mode), "space" (select), "enter" (confirm selection), "y" (confirm delete), "b" (back), "q" (quit)
+        inputs_perm = ["u\n", "d\n", "space\n", "enter\n", "y\n", "b\n", "q\n"]
         with patch("sys.stdin", io.StringIO("".join(inputs_perm))):
             app.run()
 
-        assert len(app.daily_service.get_tasks_for_date(today_str)) == 0
         assert app.task_service.get_task_by_id(u_task.id) is None
 
 
@@ -112,8 +110,8 @@ def test_delete_source_ui_confirmation():
         app.source_service.add_or_update_source(scan)
         assert len(app.source_service.get_sources()) == 1
 
-        # Open Filemeta ("+", "1"), press "d" (delete), "1" (select source 1), "y" (confirm), "b", "q"
-        inputs = ["+\n", "1\n", "d\n", "1\n", "y\n", "b\n", "q\n"]
+        # Open Filemeta ("+", "1"), press "d" (delete mode), "space" (select), "enter" (confirm selection), "y" (confirm), "b", "q"
+        inputs = ["+\n", "1\n", "d\n", "space\n", "enter\n", "y\n", "b\n", "q\n"]
         with patch("sys.stdin", io.StringIO("".join(inputs))):
             app.run()
 
@@ -469,8 +467,8 @@ def test_today_delete_silent_feedback():
         t1 = app.task_service.create_task("Task to Delete", source_type="manual")
         app.daily_service.add_task_to_date(t1.id, today_str)
 
-        # "d" (delete), "1" (select task 1), "y" (confirm delete), "q" (quit)
-        inputs = ["d\n", "1\n", "y\n", "q\n"]
+        # "d" (enter delete mode), "space" (select task 1), "enter" (confirm selection), "y" (confirm delete), "q" (quit)
+        inputs = ["d\n", "space\n", "enter\n", "y\n", "q\n"]
         with patch("sys.stdin", io.StringIO("".join(inputs))), console.capture() as capture:
             app.run()
         out = capture.get()

@@ -16,7 +16,7 @@ from todo.integrations.telegram import (
     TelegramUnauthorizedError,
 )
 from todo.models import FileItem, Source
-from todo.search import fuzzy_search
+from todo.search import LiveSearchController, fuzzy_search
 from todo.services.daily_service import DailyService
 from todo.services.source_service import SourceService
 from todo.services.task_service import TaskService
@@ -51,65 +51,177 @@ class TelegramView:
         """
         status_msg: Optional[str] = None
         selected_idx = 0
+        search = LiveSearchController[Source]()
+        selected_source_ids: Set[int] = set()
+        delete_mode = False
 
         while True:
             clear_viewport()
             sources = self.source_service.get_sources(source_type="telegram")
-            render_header("TELEGRAM CHANNELS")
+            subtitle = f"DELETE MODE · {len(selected_source_ids)} selected" if delete_mode else None
+            render_header("TELEGRAM CHANNELS", subtitle=subtitle)
+
+            valid_ids = {s.id for s in sources}
+            selected_source_ids.intersection_update(valid_ids)
 
             if status_msg:
                 print_status_message(status_msg, style="red")
                 status_msg = None
 
-            if not sources:
-                console.print(
-                    "  [dim italic]No Telegram channels imported yet.[/dim italic]\n"
-                )
-                hints = [("+", "Add channel"), ("b", "Back")]
+            if search.is_active:
+                console.print(f"  Search: [bold cyan]{search.query}[/bold cyan]█\n")
+            elif search.query:
+                console.print(f"  Search: [bold cyan]{search.query}[/bold cyan] [dim](filter active, Esc to clear)[/dim]\n")
+
+            active_sources = search.filter(sources)
+
+            if not active_sources:
+                if search.query:
+                    console.print("  [dim italic]No matching Telegram channels found.[/dim italic]\n")
+                else:
+                    console.print(
+                        "  [dim italic]No Telegram channels imported yet.[/dim italic]\n"
+                    )
+                if search.is_active:
+                    hints = [("Enter", "Done"), ("Esc", "Cancel / Clear")]
+                elif delete_mode:
+                    hints = [("Esc", "Cancel")]
+                else:
+                    hints = [("+", "Add channel"), ("/", "Search"), ("b", "Back")]
                 render_footer(hints)
             else:
-                if selected_idx >= len(sources):
-                    selected_idx = max(0, len(sources) - 1)
+                if selected_idx >= len(active_sources):
+                    selected_idx = max(0, len(active_sources) - 1)
 
                 table = Table.grid(padding=(0, 1))
                 table.add_column("cursor", justify="right", style="cyan bold", width=2)
+                if delete_mode:
+                    table.add_column("select", justify="center", width=4)
                 table.add_column("num", justify="right", style="cyan bold", width=4)
                 table.add_column("name", style="bold white", width=32)
                 table.add_column("progress", style="cyan")
 
-                for idx, src in enumerate(sources):
+                for idx, src in enumerate(active_sources):
                     cursor = "▶" if idx == selected_idx else " "
                     pct_str = (
                         f"{src.progress_pct}% ({src.completed_count}/{src.item_count})"
                     )
-                    table.add_row(
-                        cursor, f"{idx + 1}.", src.name, Text(pct_str, style="dim cyan")
-                    )
-                    table.add_row("", "", Text(f"   {src.path}", style="dim"), "")
+                    row_items = [cursor]
+                    if delete_mode:
+                        is_sel = src.id in selected_source_ids
+                        chk = Text("[x]", style="bold cyan") if is_sel else Text("[ ]", style="dim")
+                        row_items.append(chk)
+                    row_items.extend([
+                        f"{idx + 1}.",
+                        src.name,
+                        Text(pct_str, style="dim cyan"),
+                    ])
+                    table.add_row(*row_items)
+                    empty_cols = ["", ""] if not delete_mode else ["", "", ""]
+                    table.add_row(*empty_cols, Text(f"   {src.path}", style="dim"), "")
 
                 console.print(table)
                 console.print()
 
-                hints = [
-                    ("↑/↓", "Navigate"),
-                    ("Enter", "Open channel"),
-                    ("+", "Add channel"),
-                    ("d", "Delete source"),
-                    ("b", "Back"),
-                ]
+                if delete_mode:
+                    hints = [
+                        ("↑/↓", "Navigate"),
+                        ("Space", "Select"),
+                        ("Enter", f"Confirm delete ({len(selected_source_ids)})" if selected_source_ids else "Confirm delete"),
+                        ("Esc", "Cancel"),
+                    ]
+                elif search.is_active:
+                    hints = [
+                        ("↑/↓", "Navigate"),
+                        ("Enter", "Done"),
+                        ("Esc", "Cancel / Clear"),
+                    ]
+                elif search.query:
+                    hints = [
+                        ("↑/↓", "Navigate"),
+                        ("Enter", "Open channel"),
+                        ("+", "Add channel"),
+                        ("d", "Delete"),
+                        ("/", "Search"),
+                        ("Esc", "Clear search"),
+                        ("b", "Back"),
+                    ]
+                else:
+                    hints = [
+                        ("↑/↓", "Navigate"),
+                        ("Enter", "Open channel"),
+                        ("+", "Add channel"),
+                        ("d", "Delete"),
+                        ("/", "Search"),
+                        ("b", "Back"),
+                    ]
                 render_footer(hints)
 
             k = key_reader.read_key()
 
-            if k in (Key.ESCAPE, "b", "q", "cancel"):
+            if delete_mode:
+                if k in (Key.ESCAPE, "escape", "cancel"):
+                    selected_source_ids.clear()
+                    delete_mode = False
+                    continue
+
+                if k == Key.UP and active_sources:
+                    selected_idx = max(0, selected_idx - 1)
+                    continue
+
+                if k == Key.DOWN and active_sources:
+                    selected_idx = min(len(active_sources) - 1, selected_idx + 1)
+                    continue
+
+                if k in (Key.SPACE, "space", " ") and active_sources:
+                    target_src = active_sources[selected_idx]
+                    if target_src.id in selected_source_ids:
+                        selected_source_ids.remove(target_src.id)
+                    else:
+                        selected_source_ids.add(target_src.id)
+                    continue
+
+                if k in (Key.ENTER, "enter"):
+                    if not selected_source_ids:
+                        continue
+                    clear_viewport()
+                    render_header("CONFIRM BULK DELETE")
+                    console.print(
+                        f"Delete [bold white]{len(selected_source_ids)} Telegram channels[/bold white]?\n"
+                    )
+                    console.print(
+                        "[yellow]This will remove the imported channels and cached metadata from Todo.[/yellow]"
+                    )
+                    console.print(
+                        "[bold green]It will NOT delete anything from Telegram.[/bold green]\n"
+                    )
+                    render_footer([("y", "Yes, delete"), ("n", "Cancel")])
+                    k_conf = key_reader.read_key()
+                    if k_conf.lower() in ("y", "yes", Key.ENTER, "enter"):
+                        self.source_service.delete_sources_bulk(list(selected_source_ids))
+                    selected_source_ids.clear()
+                    delete_mode = False
+                    continue
+
+                # Block all other keys in delete mode
+                continue
+
+            handled, selected_idx = search.handle_key(k, len(active_sources), selected_idx)
+            if handled:
+                continue
+
+            if k in (Key.ESCAPE, "escape"):
                 return None
 
-            if k == Key.UP and sources:
+            if k in ("b", "q", "cancel"):
+                return None
+
+            if k == Key.UP and active_sources:
                 selected_idx = max(0, selected_idx - 1)
                 continue
 
-            if k == Key.DOWN and sources:
-                selected_idx = min(len(sources) - 1, selected_idx + 1)
+            if k == Key.DOWN and active_sources:
+                selected_idx = min(len(active_sources) - 1, selected_idx + 1)
                 continue
 
             # +: Open channel picker to discover and import a Telegram channel
@@ -119,26 +231,25 @@ class TelegramView:
                     return "added"
                 continue
 
-            # d: Delete imported source from Todo
-            if k in ("d", "delete") and sources:
-                del_err = self.handle_delete_source(sources, current_idx=selected_idx)
-                if del_err:
-                    status_msg = del_err
+            # d: Enter delete selection mode
+            if k in ("d", "delete") and active_sources:
+                delete_mode = True
+                selected_source_ids.clear()
                 continue
 
             # Enter: Open selected channel lessons immediately from SQLite
-            if (k in (Key.ENTER, "enter")) and sources:
-                selected_source = sources[selected_idx]
+            if (k in (Key.ENTER, "enter")) and active_sources:
+                selected_source = active_sources[selected_idx]
                 item_ret = self.handle_channel_lessons(selected_source)
                 if item_ret == "added":
                     return "added"
                 continue
 
             # Numeric selection
-            if k.isdigit() and sources:
+            if k.isdigit() and active_sources:
                 idx = int(k)
-                if 1 <= idx <= len(sources):
-                    selected_source = sources[idx - 1]
+                if 1 <= idx <= len(active_sources):
+                    selected_source = active_sources[idx - 1]
                     item_ret = self.handle_channel_lessons(selected_source)
                     if item_ret == "added":
                         return "added"
@@ -257,8 +368,7 @@ class TelegramView:
                     return self._show_error_screen("CHANNEL DISCOVERY FAILED", str(e))
 
         selected_idx = 0
-        search_mode = False
-        search_query = ""
+        search = LiveSearchController[TelegramChannel](key_fn=lambda c: c.title)
         status_msg: Optional[str] = None
 
         while True:
@@ -279,14 +389,20 @@ class TelegramView:
                 status_msg = None
 
             # Filter channels if search is active
-            if search_mode and search_query:
-                console.print(f"  Search: [bold cyan]{search_query}[/bold cyan]\n")
-                active_channels = fuzzy_search(channels, search_query, key=lambda c: c.title)
-            else:
-                active_channels = channels
+            if search.is_active:
+                console.print(f"  Search: [bold cyan]{search.query}[/bold cyan]█\n")
+            elif search.query:
+                console.print(f"  Search: [bold cyan]{search.query}[/bold cyan] [dim](filter active, Esc to clear)[/dim]\n")
+
+            active_channels = search.filter(channels)
 
             if not active_channels:
                 console.print("  [dim italic]No matching channels found.[/dim italic]\n")
+                if search.is_active:
+                    hints = [("Enter", "Done"), ("Esc", "Cancel / Clear")]
+                else:
+                    hints = [("/", "Search"), ("r", "Refresh list"), ("b", "Back")]
+                render_footer(hints)
             else:
                 if selected_idx >= len(active_channels):
                     selected_idx = max(0, len(active_channels) - 1)
@@ -333,37 +449,38 @@ class TelegramView:
                 console.print(table)
                 console.print()
 
-            if search_mode:
-                hints = [
-                    ("↑/↓", "Navigate"),
-                    ("Enter", "Select"),
-                    ("/", "Search"),
-                    ("Esc", "Exit Search"),
-                ]
-            else:
-                hints = [
-                    ("↑/↓", "Navigate"),
-                    ("Enter", "Select"),
-                    ("/", "Search"),
-                    ("r", "Refresh list"),
-                    ("b", "Back"),
-                ]
-            render_footer(hints)
+                if search.is_active:
+                    hints = [
+                        ("↑/↓", "Navigate"),
+                        ("Enter", "Done"),
+                        ("Esc", "Cancel / Clear"),
+                    ]
+                elif search.query:
+                    hints = [
+                        ("↑/↓", "Navigate"),
+                        ("Enter", "Select"),
+                        ("/", "Search"),
+                        ("Esc", "Clear search"),
+                        ("r", "Refresh list"),
+                        ("b", "Back"),
+                    ]
+                else:
+                    hints = [
+                        ("↑/↓", "Navigate"),
+                        ("Enter", "Select"),
+                        ("/", "Search"),
+                        ("r", "Refresh list"),
+                        ("b", "Back"),
+                    ]
+                render_footer(hints)
 
             k = key_reader.read_key()
 
-            if k in (Key.ESCAPE, "escape"):
-                if search_mode:
-                    search_mode = False
-                    search_query = ""
-                    continue
-                return None
+            handled, selected_idx = search.handle_key(k, len(active_channels), selected_idx)
+            if handled:
+                continue
 
-            if k in ("b", "cancel"):
-                if search_mode:
-                    search_mode = False
-                    search_query = ""
-                    continue
+            if k in (Key.ESCAPE, "escape", "b", "cancel"):
                 return None
 
             if k in ("q", "quit"):
@@ -375,21 +492,6 @@ class TelegramView:
 
             if k == Key.DOWN and active_channels:
                 selected_idx = min(len(active_channels) - 1, selected_idx + 1)
-                continue
-
-            # /: Search mode
-            if k == "/":
-                clear_viewport()
-                render_header("ADD TELEGRAM CHANNEL")
-                console.print("Enter search term (or 'Esc'/empty to clear):\n")
-                q_input = key_reader.read_text_input("Search: > ")
-                if q_input:
-                    search_query = q_input
-                    search_mode = True
-                    selected_idx = 0
-                else:
-                    search_query = ""
-                    search_mode = False
                 continue
 
             # r: Refresh channels list from Telegram
@@ -512,9 +614,10 @@ class TelegramView:
 
         # Main lesson browser loop
         selected_idx = 0
-        search_mode = False
-        search_query = ""
+        search = LiveSearchController[FileItem]()
         selected_item_ids: Set[int] = set()
+        selected_delete_ids: Set[int] = set()
+        delete_mode = False
         status_msg: Optional[str] = None
 
         while True:
@@ -522,12 +625,17 @@ class TelegramView:
             assert existing_source is not None
             items = self.source_service.get_items_by_source(existing_source.id)
 
-            today_str = datetime.now().date().isoformat()
+            valid_item_ids = {it.id for it in items}
+            selected_item_ids.intersection_update(valid_item_ids)
+            selected_delete_ids.intersection_update(valid_item_ids)
+
+            today_str = self.daily_service.get_today_str()
             today_tasks = self.daily_service.get_tasks_for_date(today_str)
+            active_today = self.daily_service.get_active_tasks_for_date(today_str)
             scheduled_item_ids = {
                 t.task.source_id
-                for t in today_tasks
-                if t.task.source_type in ("telegram", "filemeta") and t.task.source_id is not None
+                for t in (today_tasks + active_today)
+                if t.task.source_type in ("telegram", "filemeta", "youtube") and t.task.source_id is not None
             }
 
             if not items:
@@ -575,16 +683,21 @@ class TelegramView:
             # Boxed header matching format: TITLE      42% · 5/12
             render_today_header(existing_source.name, completed=completed_cnt, total=total_cnt)
 
-            if status_msg:
+            if delete_mode:
+                print_status_message(
+                    f"DELETE MODE · {len(selected_delete_ids)} selected", style="bold yellow"
+                )
+            elif status_msg:
                 print_status_message(status_msg, style="red")
                 status_msg = None
 
             # Filter items if search is active
-            if search_mode and search_query:
-                console.print(f"  Search: [bold cyan]{search_query}[/bold cyan]\n")
-                active_items = fuzzy_search(items, search_query)
-            else:
-                active_items = items
+            if search.is_active:
+                console.print(f"  Search: [bold cyan]{search.query}[/bold cyan]█\n")
+            elif search.query:
+                console.print(f"  Search: [bold cyan]{search.query}[/bold cyan] [dim](filter active, Esc to clear)[/dim]\n")
+
+            active_items = search.filter(items)
 
             if not active_items:
                 console.print("  [dim italic]No matching lessons found.[/dim italic]\n")
@@ -607,9 +720,12 @@ class TelegramView:
                     scroll_offset = 0
                     visible_slice = active_items
 
+                show_checkbox = delete_mode or bool(selected_item_ids)
+
                 table = Table.grid(padding=(0, 1))
                 table.add_column("cursor", justify="right", style="cyan bold", width=2)
-                table.add_column("select", justify="center", width=4)
+                if show_checkbox:
+                    table.add_column("select", justify="center", width=4)
                 table.add_column("icon", justify="center", width=2)
                 table.add_column("num", justify="right", style="cyan bold", width=4)
                 table.add_column("title")
@@ -618,7 +734,10 @@ class TelegramView:
                 for i, it in enumerate(visible_slice):
                     actual_i = scroll_offset + i
                     cursor = "▶" if actual_i == selected_idx else " "
-                    is_selected = it.id in selected_item_ids
+                    if delete_mode:
+                        is_selected = it.id in selected_delete_ids
+                    else:
+                        is_selected = it.id in selected_item_ids
                     chk_text = (
                         Text("[x]", style="bold cyan")
                         if is_selected
@@ -642,32 +761,60 @@ class TelegramView:
                             f"({it.metadata['duration_formatted']})", style="dim green"
                         )
 
-                    table.add_row(
-                        cursor,
-                        chk_text,
+                    row_parts = [cursor]
+                    if show_checkbox:
+                        row_parts.append(chk_text)
+                    row_parts.extend([
                         icon,
                         f"{actual_i + 1}.",
                         Text(it.title, style=title_style),
                         info_text,
-                    )
+                    ])
+                    table.add_row(*row_parts)
 
                 console.print(table)
                 console.print()
 
-            if search_mode:
+            if delete_mode:
                 hints = [
                     ("↑/↓", "Navigate"),
                     ("Space", "Select"),
-                    ("Enter", "Add"),
+                    ("Enter", f"Confirm delete ({len(selected_delete_ids)})" if selected_delete_ids else "Confirm delete"),
+                    ("Esc", "Cancel"),
+                ]
+            elif search.is_active:
+                hints = [
+                    ("↑/↓", "Navigate"),
+                    ("Enter", "Done"),
+                    ("Esc", "Cancel / Clear"),
+                ]
+            elif selected_item_ids:
+                hints = [
+                    ("↑/↓", "Navigate"),
+                    ("Space", "Deselect"),
+                    ("Enter", f"Add to Today ({len(selected_item_ids)})"),
+                    ("d", "Delete"),
+                    ("Esc", "Clear selection"),
+                    ("b", "Back"),
+                ]
+            elif search.query:
+                hints = [
+                    ("↑/↓", "Navigate"),
+                    ("Space", "Select"),
+                    ("Enter", "Add to Today"),
                     ("/", "Search"),
+                    ("Esc", "Clear search"),
                     ("n", "Next"),
-                    ("Esc", "Exit Search"),
+                    ("t", "Toggle"),
+                    ("r", "Rescan"),
+                    ("d", "Delete"),
+                    ("b", "Back"),
                 ]
             else:
                 hints = [
                     ("↑/↓", "Navigate"),
                     ("Space", "Select"),
-                    ("Enter", "Add"),
+                    ("Enter", "Add to Today"),
                     ("/", "Search"),
                     ("n", "Next"),
                     ("t", "Toggle"),
@@ -679,21 +826,64 @@ class TelegramView:
 
             k = key_reader.read_key()
 
+            if delete_mode:
+                if k in (Key.ESCAPE, "escape", "cancel"):
+                    selected_delete_ids.clear()
+                    delete_mode = False
+                    continue
+
+                if k == Key.UP and active_items:
+                    selected_idx = max(0, selected_idx - 1)
+                    continue
+
+                if k == Key.DOWN and active_items:
+                    selected_idx = min(len(active_items) - 1, selected_idx + 1)
+                    continue
+
+                if k in (Key.SPACE, "space", " ") and active_items:
+                    target_item = active_items[selected_idx]
+                    if target_item.id in selected_delete_ids:
+                        selected_delete_ids.remove(target_item.id)
+                    else:
+                        selected_delete_ids.add(target_item.id)
+                    continue
+
+                if k in (Key.ENTER, "enter"):
+                    if not selected_delete_ids:
+                        continue
+                    clear_viewport()
+                    render_header("DELETE LESSONS", subtitle=existing_source.name)
+                    console.print(
+                        f"Delete [bold white]{len(selected_delete_ids)} lessons[/bold white] from this channel?\n"
+                    )
+                    console.print(
+                        "[yellow]This will remove the lessons from Todo.[/yellow]"
+                    )
+                    console.print(
+                        "[bold green]Telegram messages remain untouched.[/bold green]\n"
+                    )
+                    render_footer([("y", "Yes, delete"), ("n", "Cancel")])
+                    k_conf = key_reader.read_key()
+                    if k_conf.lower() in ("y", "yes", Key.ENTER, "enter"):
+                        self.source_service.delete_file_items_bulk(list(selected_delete_ids))
+                    selected_delete_ids.clear()
+                    delete_mode = False
+                    continue
+
+                # Block all other keys in delete mode
+                continue
+
+            handled, selected_idx = search.handle_key(k, len(active_items), selected_idx)
+            if handled:
+                continue
+
             if k in (Key.ESCAPE, "escape"):
-                if search_mode:
-                    search_mode = False
-                    search_query = ""
+                if selected_item_ids:
+                    selected_item_ids.clear()
                     continue
                 return None
 
-            if k in ("b", "cancel"):
-                if search_mode:
-                    search_mode = False
-                    search_query = ""
-                    continue
-                return None
-
-            if k in ("q", "quit"):
+            if k in ("b", "cancel", "q", "quit"):
                 return None
 
             if k == Key.UP and active_items:
@@ -747,23 +937,6 @@ class TelegramView:
                     selected_idx = next_idx
                 continue
 
-            # /: Fuzzy search within channel lessons
-            if k == "/":
-                clear_viewport()
-                render_today_header(
-                    existing_source.name, completed=completed_cnt, total=total_cnt
-                )
-                console.print("Enter search term (or 'Esc'/empty to clear):\n")
-                q_input = key_reader.read_text_input("Search: > ")
-                if q_input:
-                    search_query = q_input
-                    search_mode = True
-                    selected_idx = 0
-                else:
-                    search_query = ""
-                    search_mode = False
-                continue
-
             # t: Toggle completion locally in SQLite
             if k in ("t", "toggle") and active_items:
                 sel_item = active_items[selected_idx]
@@ -788,23 +961,10 @@ class TelegramView:
                         status_msg = f"Rescan failed: {e}"
                 continue
 
-            # d: Delete channel source from Todo
-            if k in ("d", "delete"):
-                clear_viewport()
-                render_header("DELETE TELEGRAM SOURCE", subtitle=existing_source.name)
-                console.print(f"Source: [bold white]{existing_source.name}[/bold white]")
-                console.print(f"Path:   [dim]{existing_source.path}[/dim]\n")
-                console.print(
-                    "[yellow]This will remove the imported source and cached metadata from Todo.[/yellow]"
-                )
-                console.print(
-                    "[bold green]It will NOT delete anything from Telegram.[/bold green]\n"
-                )
-                render_footer([("y", "Yes, delete"), ("n", "Cancel")])
-                k_conf = key_reader.read_key()
-                if k_conf.lower() in ("y", "yes", Key.ENTER, "enter"):
-                    self.source_service.delete_source(existing_source.id)
-                    return None
+            # d: Enter delete selection mode
+            if k in ("d", "delete") and active_items:
+                delete_mode = True
+                selected_delete_ids.clear()
                 continue
 
             # Numeric selection

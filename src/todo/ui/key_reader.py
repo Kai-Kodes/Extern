@@ -61,13 +61,15 @@ class KeyReader:
         finally:
             self.exit()
 
-    def read_key(self) -> str:
+    def read_key(self, timeout: Optional[float] = None) -> Optional[str]:
         """
-        Read a single key event.
-        Returns a Key constant (e.g. Key.UP, Key.ENTER, Key.ESCAPE) or a character string.
+        Read a single key event, optionally with a timeout in seconds.
+        Returns a Key constant or character string, or None if timeout elapsed.
         """
         if not sys.stdin.isatty():
             # Non-interactive / piped / testing mode
+            if timeout is not None and timeout <= 0:
+                return None
             line = sys.stdin.readline()
             if not line:
                 raise EOFError()
@@ -97,6 +99,11 @@ class KeyReader:
 
         try:
             fd = sys.stdin.fileno()
+            if timeout is not None:
+                r, _, _ = select.select([fd], [], [], timeout)
+                if not r:
+                    return None
+
             raw1 = os.read(fd, 1)
             if not raw1:
                 raise EOFError()

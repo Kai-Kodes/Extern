@@ -6,8 +6,8 @@ import select
 import sys
 import termios
 import tty
-from datetime import datetime
-from typing import List, Optional, Tuple
+from datetime import date, datetime
+from typing import List, Optional, Tuple, Union
 
 from rich import box
 from rich.console import Console
@@ -67,12 +67,21 @@ def clear_viewport() -> None:
     console.clear()
 
 
-def format_today_title(date_obj: Optional[datetime] = None) -> str:
+def format_today_title(date_obj: Optional[Union[datetime, date, str]] = None) -> str:
     """Format title like 'TODAY · 8 OCT 2026'."""
     if date_obj is None:
-        date_obj = datetime.now()
-    day = date_obj.strftime("%-d")
-    month_year = date_obj.strftime("%b %Y").upper()
+        d = datetime.now()
+    elif isinstance(date_obj, str):
+        try:
+            d = datetime.fromisoformat(date_obj)
+        except Exception:
+            d = datetime.now()
+    elif isinstance(date_obj, date) and not isinstance(date_obj, datetime):
+        d = datetime(date_obj.year, date_obj.month, date_obj.day)
+    else:
+        d = date_obj
+    day = d.strftime("%-d")
+    month_year = d.strftime("%b %Y").upper()
     return f"TODAY · {day} {month_year}"
 
 
@@ -174,11 +183,11 @@ def render_progress_bar(completed: int, total: int, width: int = 16) -> str:
     return f"{bar} {pct}%"
 
 
-def read_key() -> str:
+def read_key(timeout: Optional[float] = None) -> Optional[str]:
     """
-    Read a single keypress or command via the central KeyReader.
+    Read a single keypress or command via the central KeyReader, optionally with timeout.
     """
-    return key_reader.read_key()
+    return key_reader.read_key(timeout=timeout)
 
 
 def prompt_input(prompt_text: str = "> ") -> str:

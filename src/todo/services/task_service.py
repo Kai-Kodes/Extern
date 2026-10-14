@@ -1,15 +1,24 @@
 """Service for managing core Task entities."""
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from todo.database import Database
 from todo.models import FileItem, Task
 
 
 class TaskService:
-    def __init__(self, db: Database):
+    def __init__(
+        self,
+        db: Database,
+        date_provider: Optional[Callable[[], datetime]] = None,
+    ):
         self.db = db
+        self.date_provider = date_provider
+
+    def get_now(self) -> datetime:
+        """Return the current datetime, supporting injected test clocks."""
+        return self.date_provider() if self.date_provider else datetime.now()
 
     def create_task(
         self,
@@ -20,7 +29,7 @@ class TaskService:
         status: str = "pending",
     ) -> Task:
         """Create a new task entity."""
-        now = datetime.now().isoformat()
+        now = self.get_now().isoformat()
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -160,9 +169,77 @@ class TaskService:
             file_item, source_name=source_name, source_type="telegram"
         )
 
+    def get_or_create_youtube_task(
+        self, file_item: FileItem, source_name: str = ""
+    ) -> Task:
+        """Get or create task for a YouTube playlist video."""
+        return self.get_or_create_source_task(
+            file_item, source_name=source_name, source_type="youtube"
+        )
+
+    def get_or_create_video_task(
+        self,
+        title: str,
+        canonical_url: str,
+        video_id: Optional[str] = None,
+    ) -> Tuple[Task, bool]:
+        """
+        Get or create a task for a standalone YouTube video.
+        Prevents duplicate tasks using the canonical URL or video ID.
+        Returns: (Task, is_new: bool)
+        """
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            # Search by canonical URL in description
+            cursor.execute(
+                """
+                SELECT id, title, description, source_type, source_id, status, created_at, updated_at
+                FROM tasks
+                WHERE source_type = 'youtube' AND description = ?
+                """,
+                (canonical_url,),
+            )
+            row = cursor.fetchone()
+
+            if not row and video_id:
+                # Fallback search if video_id is stored in description
+                cursor.execute(
+                    """
+                    SELECT id, title, description, source_type, source_id, status, created_at, updated_at
+                    FROM tasks
+                    WHERE source_type = 'youtube' AND description LIKE ?
+                    """,
+                    (f"%{video_id}%",),
+                )
+                row = cursor.fetchone()
+
+        if row:
+            return (
+                Task(
+                    id=row["id"],
+                    title=row["title"],
+                    description=row["description"],
+                    source_type=row["source_type"],
+                    source_id=row["source_id"],
+                    status=row["status"],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                ),
+                False,
+            )
+
+        task = self.create_task(
+            title=title,
+            description=canonical_url,
+            source_type="youtube",
+            source_id=None,
+            status="pending",
+        )
+        return task, True
+
     def update_task_status(self, task_id: int, status: str) -> None:
         """Update the base status of a task and sync with FileItem if applicable."""
-        now = datetime.now().isoformat()
+        now = self.get_now().isoformat()
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -177,21 +254,31 @@ class TaskService:
             )
             conn.commit()
 
-        if row and row["source_type"] in ("filemeta", "telegram") and row["source_id"]:
+        if row and row["source_type"] in ("filemeta", "telegram", "youtube") and row["source_id"]:
             from todo.services.source_service import SourceService
 
-            SourceService(self.db).set_item_completion(
+            SourceService(self.db, date_provider=self.date_provider).set_item_completion(
                 row["source_id"], status == "completed"
             )
+
+    def delete_tasks_bulk(self, task_ids: List[int]) -> int:
+        """
+        Delete multiple tasks permanently in a single transaction.
+        All associated daily_tasks are cascade-deleted by foreign keys.
+        """
+        if not task_ids:
+            return 0
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" for _ in task_ids)
+            cursor.execute(f"DELETE FROM tasks WHERE id IN ({placeholders})", task_ids)
+            deleted = cursor.rowcount
+            conn.commit()
+        return deleted
 
     def delete_task(self, task_id: int) -> bool:
         """
         Delete a task permanently.
         All associated daily_tasks are cascade-deleted by foreign keys.
         """
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-            deleted = cursor.rowcount > 0
-            conn.commit()
-        return deleted
+        return self.delete_tasks_bulk([task_id]) > 0

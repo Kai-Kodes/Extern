@@ -13,9 +13,14 @@ import tomllib
 class Config:
     db_path: Path
     filemeta_command: str = "filemeta"
+    filemeta_timeout: int = 60
+    filemeta_device_timeout: int = 300
     telegram_api_id: Optional[int] = None
     telegram_api_hash: Optional[str] = None
     telegram_session_path: Optional[Path] = None
+    pomodoro_work_sound: Optional[str] = None
+    pomodoro_break_sound: Optional[str] = None
+    pomodoro_audio_player: Optional[str] = None
 
     @classmethod
     def load(cls) -> "Config":
@@ -48,9 +53,20 @@ class Config:
             db_path = default_db_path
 
         filemeta_command = "filemeta"
+        filemeta_timeout = 60
+        filemeta_device_timeout = 300
         telegram_api_id: Optional[int] = None
         telegram_api_hash: Optional[str] = None
         telegram_session_path: Optional[Path] = None
+
+        # Check environment variables for Filemeta timeouts
+        env_fm_timeout = os.environ.get("FILEMETA_TIMEOUT") or os.environ.get("TODO_FILEMETA_TIMEOUT")
+        if env_fm_timeout and env_fm_timeout.isdigit():
+            filemeta_timeout = int(env_fm_timeout)
+
+        env_fm_dev_timeout = os.environ.get("FILEMETA_DEVICE_TIMEOUT") or os.environ.get("TODO_FILEMETA_DEVICE_TIMEOUT")
+        if env_fm_dev_timeout and env_fm_dev_timeout.isdigit():
+            filemeta_device_timeout = int(env_fm_dev_timeout)
 
         # Check environment variables for Telegram
         env_tg_api_id = os.environ.get("TELEGRAM_API_ID")
@@ -65,6 +81,10 @@ class Config:
         if env_tg_session:
             telegram_session_path = Path(env_tg_session).expanduser().resolve()
 
+        pomodoro_work_sound = os.environ.get("TODO_POMODORO_WORK_SOUND")
+        pomodoro_break_sound = os.environ.get("TODO_POMODORO_BREAK_SOUND")
+        pomodoro_audio_player = os.environ.get("TODO_POMODORO_PLAYER")
+
         if config_file.exists():
             try:
                 with open(config_file, "rb") as f:
@@ -74,8 +94,20 @@ class Config:
                     if not env_db:  # Environment variable takes precedence
                         db_path = Path(data["general"]["db_path"]).expanduser().resolve()
 
-                if "filemeta" in data and "command" in data["filemeta"]:
-                    filemeta_command = str(data["filemeta"]["command"])
+                if "filemeta" in data:
+                    fm_sec = data["filemeta"]
+                    if "command" in fm_sec:
+                        filemeta_command = str(fm_sec["command"])
+                    if "timeout" in fm_sec and not env_fm_timeout:
+                        try:
+                            filemeta_timeout = int(fm_sec["timeout"])
+                        except (ValueError, TypeError):
+                            pass
+                    if "device_timeout" in fm_sec and not env_fm_dev_timeout:
+                        try:
+                            filemeta_device_timeout = int(fm_sec["device_timeout"])
+                        except (ValueError, TypeError):
+                            pass
 
                 if "telegram" in data:
                     tg_sec = data["telegram"]
@@ -85,6 +117,15 @@ class Config:
                         telegram_api_hash = str(tg_sec["api_hash"]).strip()
                     if not telegram_session_path and "session_path" in tg_sec:
                         telegram_session_path = Path(tg_sec["session_path"]).expanduser().resolve()
+
+                if "pomodoro" in data:
+                    pomo_sec = data["pomodoro"]
+                    if not pomodoro_work_sound and "work_sound" in pomo_sec:
+                        pomodoro_work_sound = str(pomo_sec["work_sound"]).strip()
+                    if not pomodoro_break_sound and "break_sound" in pomo_sec:
+                        pomodoro_break_sound = str(pomo_sec["break_sound"]).strip()
+                    if not pomodoro_audio_player and "player" in pomo_sec:
+                        pomodoro_audio_player = str(pomo_sec["player"]).strip()
             except Exception:
                 # If config parsing fails, fallback gracefully to defaults
                 pass
@@ -110,9 +151,14 @@ class Config:
         return cls(
             db_path=db_path,
             filemeta_command=filemeta_command,
+            filemeta_timeout=filemeta_timeout,
+            filemeta_device_timeout=filemeta_device_timeout,
             telegram_api_id=telegram_api_id,
             telegram_api_hash=telegram_api_hash,
             telegram_session_path=telegram_session_path,
+            pomodoro_work_sound=pomodoro_work_sound,
+            pomodoro_break_sound=pomodoro_break_sound,
+            pomodoro_audio_player=pomodoro_audio_player,
         )
 
     @classmethod

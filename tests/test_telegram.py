@@ -1015,8 +1015,8 @@ def test_telegram_home_source_removal():
         adapter = MagicMock()
         view = TelegramView(adapter, source_svc, task_svc, daily_svc)
 
-        # On home screen: press 'd' (delete), 'Enter' to select, 'y' to confirm, then 'b' to exit
-        with patch("todo.ui.telegram_view.key_reader.read_key", side_effect=["d", Key.ENTER, "y", "b"]):
+        # On home screen: press 'd' (enter delete mode), Space (select), 'Enter' to confirm selection, 'y' to confirm, then 'b' to exit
+        with patch("todo.ui.telegram_view.key_reader.read_key", side_effect=["d", Key.SPACE, Key.ENTER, "y", "b"]):
             view.run()
 
         # Source deleted from SQLite!

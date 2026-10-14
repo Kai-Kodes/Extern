@@ -1,6 +1,6 @@
 """Today view screen and interaction logic for full-screen TUI."""
 
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from rich.table import Table
 from rich.text import Text
@@ -34,16 +34,37 @@ class TodayView:
         status_style: str = "green",
         selected_idx: int = 0,
         clear: bool = True,
+        current_date: Optional[str] = None,
+        completed_count: Optional[int] = None,
+        total_count: Optional[int] = None,
+        selected_ids: Optional[Set[int]] = None,
+        mode: Optional[str] = None,
     ) -> None:
         """Render the Today screen within the TUI viewport."""
         if clear:
             clear_viewport()
 
-        total = len(tasks)
-        completed = sum(1 for dt in tasks if dt.is_completed)
-        render_today_header(format_today_title(), completed=completed, total=total)
+        if total_count is not None and completed_count is not None:
+            total = total_count
+            completed = completed_count
+        else:
+            total = len(tasks)
+            completed = sum(1 for dt in tasks if dt.is_completed)
 
-        if status_msg:
+        date_title = format_today_title(current_date)
+        render_today_header(date_title, completed=completed, total=total)
+
+        sel_set = selected_ids or set()
+
+        if mode == "delete":
+            print_status_message(
+                f"DELETE MODE · {len(sel_set)} selected", style="bold yellow"
+            )
+        elif mode == "move":
+            print_status_message(
+                f"MOVE MODE · {len(sel_set)} selected", style="bold cyan"
+            )
+        elif status_msg:
             print_status_message(status_msg, style=status_style)
 
         if not tasks:
@@ -51,12 +72,16 @@ class TodayView:
             hints = [
                 ("+", "Add task"),
                 ("u", "Universal tasks"),
+                ("p", "Pomodoro"),
                 ("q", "Quit"),
             ]
             render_footer(hints)
         else:
             table = Table.grid(padding=(0, 1))
             table.add_column("cursor", justify="right", style="cyan bold", width=2)
+            show_checkboxes = bool(mode or sel_set)
+            if show_checkboxes:
+                table.add_column("select", justify="center", width=4)
             table.add_column("num", justify="right", style="cyan bold", width=4)
             table.add_column("icon", justify="center", width=3)
             table.add_column("title")
@@ -72,19 +97,52 @@ class TodayView:
                     icon = Text("○", style="bright_yellow")
                     title = Text(task_title, style="bold white")
 
-                table.add_row(cursor, f"{idx + 1}.", icon, title)
+                row_items = [cursor]
+                if show_checkboxes:
+                    is_sel = dt.id in sel_set
+                    chk = Text("[x]", style="bold cyan") if is_sel else Text("[ ]", style="dim")
+                    row_items.append(chk)
+                row_items.extend([f"{idx + 1}.", icon, title])
+
+                table.add_row(*row_items)
 
             console.print(table)
             console.print()
 
-            hints = [
-                ("↑/↓", "Navigate"),
-                ("Enter", "Toggle"),
-                ("+", "Add task"),
-                ("d", "Delete"),
-                ("u", "Universal"),
-                ("q", "Quit"),
-            ]
+            if mode == "delete":
+                hints = [
+                    ("↑/↓", "Navigate"),
+                    ("Space", "Select"),
+                    ("Enter", f"Confirm delete ({len(sel_set)})" if sel_set else "Confirm delete"),
+                    ("Esc", "Cancel"),
+                ]
+            elif mode == "move":
+                hints = [
+                    ("↑/↓", "Navigate"),
+                    ("Space", "Select"),
+                    ("Enter", f"Move ({len(sel_set)})" if sel_set else "Move to Universal"),
+                    ("Esc", "Cancel"),
+                ]
+            elif sel_set:
+                hints = [
+                    ("Space", "Deselect"),
+                    ("Enter", "Toggle"),
+                    ("d", f"Delete ({len(sel_set)})"),
+                    ("m", f"Move to Universal ({len(sel_set)})"),
+                    ("Esc", "Clear selection"),
+                    ("q", "Quit"),
+                ]
+            else:
+                hints = [
+                    ("↑/↓", "Navigate"),
+                    ("Enter", "Toggle"),
+                    ("+", "Add task"),
+                    ("d", "Delete"),
+                    ("m", "Move to Universal"),
+                    ("u", "Universal"),
+                    ("p", "Pomodoro"),
+                    ("q", "Quit"),
+                ]
             render_footer(hints)
 
     def handle_delete(
@@ -179,8 +237,8 @@ class TodayView:
                 return None
             return None
 
-        # 2. Filemeta / Telegram task deletion semantics
-        elif task and task.source_type in ("filemeta", "telegram"):
+        # 2. Filemeta / Telegram / YouTube task deletion semantics
+        elif task and task.source_type in ("filemeta", "telegram", "youtube"):
             clear_viewport()
             render_header("REMOVE FROM TODAY", subtitle=title)
             console.print(

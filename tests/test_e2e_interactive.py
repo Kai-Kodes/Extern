@@ -38,10 +38,10 @@ def test_e2e_full_workflow():
             app.run()
 
         # Session 2: Create a universal task via Manual menu
-        # + (Add task) -> 3 (Manual task) -> "Study DSA" -> 2 (Universal list) -> q (Quit)
+        # + (Add task) -> 5 (Manual task) -> "Study DSA" -> 2 (Universal list) -> q (Quit)
         inputs_session2 = [
             "+\n",
-            "3\n",
+            "5\n",
             "Study DSA\n",
             "2\n",
             "q\n",
@@ -66,10 +66,10 @@ def test_e2e_full_workflow():
         assert len(daily_svc.get_tasks_for_date(today_str)) == 0
 
         # Session 3: Add the universal task to today
-        # + (Add task) -> 2 (Universal task) -> 1 (select "Study DSA") -> q (Quit)
+        # + (Add task) -> 4 (Universal Tasks) -> 1 (select "Study DSA") -> q (Quit)
         inputs_session3 = [
             "+\n",
-            "2\n",
+            "4\n",
             "1\n",
             "q\n",
         ]
@@ -103,10 +103,10 @@ def test_e2e_full_workflow():
         assert "01 - Understanding Desire" in titles
 
         # Session 5: Add manual task directly to today
-        # + (Add task) -> 3 (Manual task) -> "Complete DBMS assignment" -> 1 (Today) -> q
+        # + (Add task) -> 5 (Manual task) -> "Complete DBMS assignment" -> 1 (Today) -> q
         inputs_session5 = [
             "+\n",
-            "3\n",
+            "5\n",
             "Complete DBMS assignment\n",
             "1\n",
             "q\n",
@@ -119,7 +119,7 @@ def test_e2e_full_workflow():
         assert len(today_tasks) == 3
 
         # Session 6: Toggle tasks completion
-        # Toggle task 1 (Study DSA) -> complete
+        # Toggle task 1 (Study DSA) -> complete (remains visible with checkmark)
         # Toggle task 2 -> complete
         # Toggle task 1 -> reopen
         # q
@@ -136,6 +136,7 @@ def test_e2e_full_workflow():
         today_tasks = daily_svc.get_tasks_for_date(today_str)
         assert today_tasks[0].is_completed is False
         assert today_tasks[1].is_completed is True
+        assert len(app.daily_service.get_active_tasks_for_date(today_str)) == 3
 
         # Session 7: Restart new instance and verify all data persists
         new_app = TodoApp(cfg)
