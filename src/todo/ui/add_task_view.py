@@ -20,11 +20,13 @@ class AddTaskView:
         status_msg: Optional[str] = None,
         selected_idx: int = 0,
         clear: bool = True,
+        target_date: Optional[str] = None,
     ) -> None:
         if clear:
             clear_viewport()
 
-        render_header("ADD TASK")
+        subtitle = f"Schedule for {target_date}" if target_date else None
+        render_header("ADD TASK", subtitle=subtitle)
 
         if status_msg:
             print_status_message(status_msg)

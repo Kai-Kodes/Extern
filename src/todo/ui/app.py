@@ -32,6 +32,7 @@ from todo.ui.key_reader import Key, key_reader
 from todo.ui.manual_view import ManualView
 from todo.ui.pomodoro_view import PomodoroView
 from todo.ui.telegram_view import TelegramView
+from todo.ui.timeline_view import TimelineView
 from todo.ui.today_view import TodayView
 from todo.ui.universal_view import UniversalView
 from todo.ui.youtube_view import YouTubeView
@@ -85,6 +86,12 @@ class TodoApp:
         )
         self.universal_view = UniversalView(self.task_service, self.daily_service)
         self.manual_view = ManualView(self.task_service, self.daily_service)
+        self.timeline_view = TimelineView(
+            daily_service=self.daily_service,
+            task_service=self.task_service,
+            add_task_menu_fn=self.handle_add_task_menu,
+            date_provider=self.date_provider,
+        )
 
         self.pomodoro_service = PomodoroService(self.db, date_provider=self.date_provider)
         self.audio_service = AudioService(
@@ -267,6 +274,10 @@ class TodoApp:
                         self.pomodoro_view.run()
                         continue
 
+                    if choice.lower() in ("l", "timeline"):
+                        self.timeline_view.run()
+                        continue
+
                     if choice.isdigit() and tasks:
                         idx = int(choice)
                         if 1 <= idx <= len(tasks):
@@ -296,14 +307,17 @@ class TodoApp:
             selected_task_ids.clear()
         return None
 
-    def handle_add_task_menu(self) -> Optional[str]:
+    def handle_add_task_menu(self, target_date: Optional[str] = None) -> Optional[str]:
         """Show Add Task menu and dispatch to the corresponding workflow."""
         add_status: Optional[str] = None
         selected_idx = 0
 
         while True:
             self.add_task_view.render(
-                status_msg=add_status, selected_idx=selected_idx, clear=True
+                status_msg=add_status,
+                selected_idx=selected_idx,
+                clear=True,
+                target_date=target_date,
             )
             add_status = None
 
@@ -336,11 +350,11 @@ class TodoApp:
                 return None
 
             elif choice in ("4", "u"):
-                self.universal_view.run(select_mode=True)
+                self.universal_view.run(select_mode=True, target_date=target_date)
                 return None
 
             elif choice in ("5", "m"):
-                self.manual_view.run()
+                self.manual_view.run(target_date=target_date)
                 return None
 
             else:

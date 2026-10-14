@@ -71,6 +71,7 @@ class TodayView:
             console.print("  [dim italic]No tasks scheduled for today.[/dim italic]\n")
             hints = [
                 ("+", "Add task"),
+                ("l", "Timeline"),
                 ("u", "Universal tasks"),
                 ("p", "Pomodoro"),
                 ("q", "Quit"),
@@ -137,6 +138,7 @@ class TodayView:
                     ("↑/↓", "Navigate"),
                     ("Enter", "Toggle"),
                     ("+", "Add task"),
+                    ("l", "Timeline"),
                     ("d", "Delete"),
                     ("m", "Move to Universal"),
                     ("u", "Universal"),

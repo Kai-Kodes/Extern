@@ -16,7 +16,7 @@ class ManualView:
         self.task_service = task_service
         self.daily_service = daily_service
 
-    def run(self) -> Optional[str]:
+    def run(self, target_date: Optional[str] = None) -> Optional[str]:
         """Prompt user for manual task title and destination."""
         clear_viewport()
         render_header("MANUAL TASK")
@@ -27,8 +27,11 @@ class ManualView:
         if not task_title or task_title.lower() in ("b", "back", "cancel", "q", "quit"):
             return None
 
-        # Destination selection with keyboard support
-        options = ["Today", "Universal list"]
+        today_str = self.daily_service.get_today_str()
+        if target_date and target_date != today_str:
+            options = [f"Scheduled date ({target_date})", "Today", "Universal list"]
+        else:
+            options = ["Today", "Universal list"]
         sel_idx = 0
 
         while True:
@@ -48,10 +51,11 @@ class ManualView:
 
             console.print(table)
             console.print()
+            footer_keys = f"Enter / 1-{len(options)}"
             render_footer(
                 [
                     ("↑/↓", "Navigate"),
-                    ("Enter / 1-2", "Select"),
+                    (footer_keys, "Select"),
                     ("b", "Cancel"),
                 ]
             )
@@ -72,28 +76,50 @@ class ManualView:
             if k in (Key.ENTER, "enter"):
                 break
 
-            if k == "1":
-                sel_idx = 0
-                break
+            if k.isdigit():
+                digit = int(k)
+                if 1 <= digit <= len(options):
+                    sel_idx = digit - 1
+                    break
 
-            if k == "2":
-                sel_idx = 1
-                break
-
-        if sel_idx == 0:
-            task = self.task_service.create_task(
-                title=task_title,
-                source_type="manual",
-                status="pending",
-            )
-            today_str = self.daily_service.get_today_str()
-            self.daily_service.add_task_to_date(task.id, today_str)
-            return None
+        if target_date and target_date != today_str:
+            if sel_idx == 0:
+                task = self.task_service.create_task(
+                    title=task_title,
+                    source_type="manual",
+                    status="pending",
+                )
+                self.daily_service.add_task_to_date(task.id, target_date)
+                return None
+            elif sel_idx == 1:
+                task = self.task_service.create_task(
+                    title=task_title,
+                    source_type="manual",
+                    status="pending",
+                )
+                self.daily_service.add_task_to_date(task.id, today_str)
+                return None
+            else:
+                self.task_service.create_task(
+                    title=task_title,
+                    source_type="universal",
+                    status="pending",
+                )
+                return None
         else:
-            self.task_service.create_task(
-                title=task_title,
-                source_type="universal",
-                status="pending",
-            )
-            return None
+            if sel_idx == 0:
+                task = self.task_service.create_task(
+                    title=task_title,
+                    source_type="manual",
+                    status="pending",
+                )
+                self.daily_service.add_task_to_date(task.id, today_str)
+                return None
+            else:
+                self.task_service.create_task(
+                    title=task_title,
+                    source_type="universal",
+                    status="pending",
+                )
+                return None
 

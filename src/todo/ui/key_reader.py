@@ -90,6 +90,10 @@ class KeyReader:
                 return Key.ESCAPE
             elif raw in ("backspace", "\x7f", "\x08"):
                 return Key.BACKSPACE
+            elif raw in ("pageup", "page_up", "\x1b[5~"):
+                return Key.PAGE_UP
+            elif raw in ("pagedown", "page_down", "\x1b[6~"):
+                return Key.PAGE_DOWN
             return raw
 
         # Interactive TTY reading

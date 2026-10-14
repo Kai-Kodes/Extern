@@ -439,3 +439,243 @@ class DailyService:
 
         from todo.services.task_service import TaskService
         return TaskService(self.db, date_provider=self.date_provider).delete_task(task_id)
+
+    def get_timeline_data_for_date(self, date_str: str) -> dict:
+        """
+        Retrieve timeline data for a specific date:
+        - Past dates (date_str < today): Completed tasks on that exact date (completed_at LIKE date_str%).
+        - Today (date_str == today): Active tasks (pending carried forward + completed today).
+        - Future dates (date_str > today): Tasks scheduled specifically for that date (t.status = 'pending' and completed_at IS NULL).
+        """
+        today_str = self.get_today_str()
+
+        if date_str < today_str:
+            domain = "past"
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT dt.id AS daily_id, dt.task_id, dt.date, dt.position, dt.completed_at,
+                           t.id AS t_id, t.title, t.description, t.source_type, t.source_id,
+                           t.status, t.created_at, t.updated_at
+                    FROM daily_tasks dt
+                    JOIN tasks t ON dt.task_id = t.id
+                    WHERE dt.completed_at LIKE ?
+                    ORDER BY dt.completed_at ASC, dt.id ASC
+                    """,
+                    (f"{date_str}%",),
+                )
+                rows = cursor.fetchall()
+
+            tasks = []
+            for r in rows:
+                task = Task(
+                    id=r["t_id"],
+                    title=r["title"],
+                    description=r["description"],
+                    source_type=r["source_type"],
+                    source_id=r["source_id"],
+                    status=r["status"],
+                    created_at=r["created_at"],
+                    updated_at=r["updated_at"],
+                )
+                dt = DailyTask(
+                    id=r["daily_id"],
+                    task_id=r["task_id"],
+                    date=r["date"],
+                    position=r["position"],
+                    completed_at=r["completed_at"],
+                    task=task,
+                )
+                tasks.append(dt)
+
+            completed_cnt = len(tasks)
+            total_cnt = len(tasks)
+            pct = 100 if total_cnt > 0 else 0
+
+        elif date_str == today_str:
+            domain = "today"
+            tasks = self.get_active_tasks_for_date(today_str)
+            completed_cnt, total_cnt, pct = self.get_progress_for_date(today_str)
+
+        else:
+            domain = "future"
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT dt.id AS daily_id, dt.task_id, dt.date, dt.position, dt.completed_at,
+                           t.id AS t_id, t.title, t.description, t.source_type, t.source_id,
+                           t.status, t.created_at, t.updated_at
+                    FROM daily_tasks dt
+                    JOIN tasks t ON dt.task_id = t.id
+                    WHERE dt.date = ?
+                      AND t.status = 'pending'
+                      AND dt.completed_at IS NULL
+                    ORDER BY dt.position ASC, dt.id ASC
+                    """,
+                    (date_str,),
+                )
+                rows = cursor.fetchall()
+
+            tasks = []
+            for r in rows:
+                task = Task(
+                    id=r["t_id"],
+                    title=r["title"],
+                    description=r["description"],
+                    source_type=r["source_type"],
+                    source_id=r["source_id"],
+                    status=r["status"],
+                    created_at=r["created_at"],
+                    updated_at=r["updated_at"],
+                )
+                dt = DailyTask(
+                    id=r["daily_id"],
+                    task_id=r["task_id"],
+                    date=r["date"],
+                    position=r["position"],
+                    completed_at=r["completed_at"],
+                    task=task,
+                )
+                tasks.append(dt)
+
+            completed_cnt = 0
+            total_cnt = len(tasks)
+            pct = 0
+
+        return {
+            "selected_date": date_str,
+            "today_str": today_str,
+            "domain": domain,
+            "tasks": tasks,
+            "completed_count": completed_cnt,
+            "total_count": total_cnt,
+            "progress_pct": pct,
+        }
+
+    def reschedule_task(self, task_id: int, target_date: str) -> DailyTask:
+        """
+        Reschedule an existing pending task to a target date:
+        - Ensures exactly one active pending schedule entry exists for the task.
+        - Preserves historical completed entries (completed_at IS NOT NULL).
+        - If the task is completed, prevents rescheduling.
+        - Transactional and idempotent.
+        """
+        now = self.get_now().isoformat()
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, status FROM tasks WHERE id = ?", (task_id,))
+            t_row = cursor.fetchone()
+            if not t_row:
+                raise ValueError(f"Task #{task_id} not found")
+            if t_row["status"] == "completed":
+                raise ValueError(
+                    f"Cannot reschedule completed task #{task_id}. Historical completed tasks cannot be rescheduled."
+                )
+
+            # Determine next position on target date
+            cursor.execute(
+                "SELECT COALESCE(MAX(position), 0) AS max_pos FROM daily_tasks WHERE date = ?",
+                (target_date,),
+            )
+            next_pos = cursor.fetchone()["max_pos"] + 1
+
+            # Check if entry already exists on target date
+            cursor.execute(
+                "SELECT id, completed_at FROM daily_tasks WHERE task_id = ? AND date = ?",
+                (task_id, target_date),
+            )
+            existing_on_target = cursor.fetchone()
+
+            if existing_on_target:
+                if existing_on_target["completed_at"] is not None:
+                    raise ValueError(
+                        f"Task #{task_id} was already completed on {target_date}."
+                    )
+                target_dt_id = existing_on_target["id"]
+                # Delete any other pending rows
+                cursor.execute(
+                    "DELETE FROM daily_tasks WHERE task_id = ? AND completed_at IS NULL AND id != ?",
+                    (task_id, target_dt_id),
+                )
+            else:
+                # Find any other pending entry to update
+                cursor.execute(
+                    "SELECT id FROM daily_tasks WHERE task_id = ? AND completed_at IS NULL ORDER BY id ASC",
+                    (task_id,),
+                )
+                pending_rows = cursor.fetchall()
+                if pending_rows:
+                    target_dt_id = pending_rows[0]["id"]
+                    cursor.execute(
+                        "UPDATE daily_tasks SET date = ?, position = ? WHERE id = ?",
+                        (target_date, next_pos, target_dt_id),
+                    )
+                    # Clean up any extra pending entries if any existed
+                    if len(pending_rows) > 1:
+                        other_ids = [r["id"] for r in pending_rows[1:]]
+                        ph = ",".join("?" for _ in other_ids)
+                        cursor.execute(
+                            f"DELETE FROM daily_tasks WHERE id IN ({ph})",
+                            other_ids,
+                        )
+                else:
+                    # No pending entry (e.g. from Universal list)
+                    cursor.execute(
+                        """
+                        INSERT INTO daily_tasks (task_id, date, position, completed_at)
+                        VALUES (?, ?, ?, NULL)
+                        """,
+                        (task_id, target_date, next_pos),
+                    )
+                    target_dt_id = cursor.lastrowid
+
+            cursor.execute(
+                "UPDATE tasks SET status = 'pending', updated_at = ? WHERE id = ?",
+                (now, task_id),
+            )
+            conn.commit()
+
+        from todo.services.task_service import TaskService
+        task = TaskService(self.db, date_provider=self.date_provider).get_task_by_id(task_id)
+        return DailyTask(
+            id=target_dt_id,
+            task_id=task_id,
+            date=target_date,
+            position=next_pos,
+            completed_at=None,
+            task=task,
+        )
+
+    def reschedule_daily_task(self, daily_task_id: int, target_date: str) -> DailyTask:
+        """Reschedule a daily task by its daily_tasks.id to target_date."""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT task_id, completed_at FROM daily_tasks WHERE id = ?",
+                (daily_task_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"Daily task #{daily_task_id} not found")
+            if row["completed_at"] is not None:
+                raise ValueError("Cannot reschedule a completed historical task record.")
+            task_id = row["task_id"]
+
+        return self.reschedule_task(task_id, target_date)
+
+    def create_task_for_date(
+        self, title: str, date_str: str, description: str = ""
+    ) -> DailyTask:
+        """Create a new manual task scheduled directly for a specific date."""
+        from todo.services.task_service import TaskService
+        task_svc = TaskService(self.db, date_provider=self.date_provider)
+        task = task_svc.create_task(
+            title=title,
+            description=description,
+            source_type="manual",
+            status="pending",
+        )
+        dt, _ = self.add_task_to_date(task.id, date_str)
+        return dt

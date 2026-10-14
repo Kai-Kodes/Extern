@@ -25,7 +25,9 @@ class UniversalView:
         self.task_service = task_service
         self.daily_service = daily_service
 
-    def run(self, select_mode: bool = True) -> Optional[str]:
+    def run(
+        self, select_mode: bool = True, target_date: Optional[str] = None
+    ) -> Optional[str]:
         """Display Universal tasks in the TUI viewport with keyboard navigation and live search."""
         status_msg: Optional[str] = None
         status_style: str = "green"
@@ -37,7 +39,7 @@ class UniversalView:
 
         while True:
             clear_viewport()
-            subtitle = "Manage backlog tasks"
+            subtitle = f"Schedule for {target_date}" if target_date else "Manage backlog tasks"
             if delete_mode:
                 subtitle = f"DELETE MODE · {len(selected_task_ids)} selected"
             render_header("UNIVERSAL TASKS", subtitle=subtitle)
@@ -236,15 +238,15 @@ class UniversalView:
                 continue
 
             if (k in (Key.ENTER, "enter")) and active_tasks:
-                today_str = self.daily_service.get_today_str()
+                dest_date = target_date or self.daily_service.get_today_str()
                 if selected_schedule_ids:
                     for t_id in selected_schedule_ids:
-                        self.daily_service.add_task_to_date(t_id, today_str)
+                        self.daily_service.add_task_to_date(t_id, dest_date)
                     selected_schedule_ids.clear()
                 else:
                     selected_task = active_tasks[selected_idx]
                     self.daily_service.add_task_to_date(
-                        selected_task.id, today_str
+                        selected_task.id, dest_date
                     )
                 return None
 
@@ -252,9 +254,9 @@ class UniversalView:
                 idx = int(k)
                 if 1 <= idx <= len(active_tasks):
                     selected_task = active_tasks[idx - 1]
-                    today_str = self.daily_service.get_today_str()
+                    dest_date = target_date or self.daily_service.get_today_str()
                     self.daily_service.add_task_to_date(
-                        selected_task.id, today_str
+                        selected_task.id, dest_date
                     )
                     return None
                 else:

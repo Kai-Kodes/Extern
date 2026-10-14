@@ -116,6 +116,7 @@ CREATE INDEX IF NOT EXISTS idx_file_items_rel_path ON file_items(source_id, rela
 
 CREATE INDEX IF NOT EXISTS idx_tasks_source ON tasks(source_type, source_id);
 CREATE INDEX IF NOT EXISTS idx_daily_tasks_date ON daily_tasks(date);
+CREATE INDEX IF NOT EXISTS idx_daily_tasks_completed_at ON daily_tasks(completed_at);
 CREATE INDEX IF NOT EXISTS idx_telegram_cache_title ON telegram_channels_cache(title);
 CREATE INDEX IF NOT EXISTS idx_pomodoro_presets_name ON pomodoro_presets(name);
 """
@@ -178,6 +179,12 @@ class Database:
                 cursor.execute("ALTER TABLE file_items ADD COLUMN file_size INTEGER DEFAULT 0")
             if "extension" not in fi_columns:
                 cursor.execute("ALTER TABLE file_items ADD COLUMN extension TEXT")
+
+            # Migration check for daily_tasks
+            cursor.execute("PRAGMA table_info(daily_tasks)")
+            dt_columns = {row["name"] for row in cursor.fetchall()}
+            if "completed_at" not in dt_columns:
+                cursor.execute("ALTER TABLE daily_tasks ADD COLUMN completed_at TEXT")
 
             # 3. Create all indexes safely now that tables and columns are guaranteed to exist
             conn.executescript(INDEXES_SQL)
