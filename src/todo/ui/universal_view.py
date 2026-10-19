@@ -1,7 +1,7 @@
 """Universal task list view with keyboard navigation and deletion."""
 
 from datetime import datetime
-from typing import Optional, Set
+from typing import Any, Optional, Set
 
 from rich.table import Table
 from rich.text import Text
@@ -21,9 +21,15 @@ from todo.ui.key_reader import Key, key_reader
 
 
 class UniversalView:
-    def __init__(self, task_service: TaskService, daily_service: DailyService):
+    def __init__(
+        self,
+        task_service: TaskService,
+        daily_service: DailyService,
+        task_editor: Optional[Any] = None,
+    ):
         self.task_service = task_service
         self.daily_service = daily_service
+        self.task_editor = task_editor
 
     def run(
         self, select_mode: bool = True, target_date: Optional[str] = None
@@ -146,6 +152,7 @@ class UniversalView:
                         ("Space", "Select"),
                         ("Enter", "Add to Today"),
                         ("+", "Add task"),
+                        ("e", "Edit"),
                         ("d", "Delete"),
                         ("/", "Search"),
                         ("b", "Back"),
@@ -229,6 +236,17 @@ class UniversalView:
                 if err_msg:
                     status_msg = err_msg
                     status_style = "red"
+                continue
+
+            if k in ("e", "edit") and active_tasks and self.task_editor:
+                target_task = active_tasks[selected_idx]
+                updated, msg = self.task_editor.edit_task(target_task)
+                if updated:
+                    status_msg = msg
+                    status_style = "green"
+                elif msg:
+                    status_msg = msg
+                    status_style = "yellow"
                 continue
 
             if k in ("d", "delete") and active_tasks:

@@ -21,6 +21,10 @@ class Config:
     pomodoro_work_sound: Optional[str] = None
     pomodoro_break_sound: Optional[str] = None
     pomodoro_audio_player: Optional[str] = None
+    google_client_id: Optional[str] = None
+    google_client_secret: Optional[str] = None
+    google_credentials_file: Optional[Path] = None
+    google_token_path: Optional[Path] = None
 
     @classmethod
     def load(cls) -> "Config":
@@ -85,6 +89,33 @@ class Config:
         pomodoro_break_sound = os.environ.get("TODO_POMODORO_BREAK_SOUND")
         pomodoro_audio_player = os.environ.get("TODO_POMODORO_PLAYER")
 
+        google_client_id = (
+            os.environ.get("GOOGLE_TASKS_CLIENT_ID")
+            or os.environ.get("TODO_GOOGLE_CLIENT_ID")
+        )
+        google_client_secret = (
+            os.environ.get("GOOGLE_TASKS_CLIENT_SECRET")
+            or os.environ.get("TODO_GOOGLE_CLIENT_SECRET")
+        )
+        env_google_creds = (
+            os.environ.get("GOOGLE_TASKS_CREDENTIALS_FILE")
+            or os.environ.get("TODO_GOOGLE_CREDENTIALS_FILE")
+        )
+        google_credentials_file = (
+            Path(env_google_creds).expanduser().resolve()
+            if env_google_creds
+            else None
+        )
+        env_google_token = (
+            os.environ.get("GOOGLE_TASKS_TOKEN_PATH")
+            or os.environ.get("TODO_GOOGLE_TOKEN_PATH")
+        )
+        google_token_path = (
+            Path(env_google_token).expanduser().resolve()
+            if env_google_token
+            else None
+        )
+
         if config_file.exists():
             try:
                 with open(config_file, "rb") as f:
@@ -126,9 +157,33 @@ class Config:
                         pomodoro_break_sound = str(pomo_sec["break_sound"]).strip()
                     if not pomodoro_audio_player and "player" in pomo_sec:
                         pomodoro_audio_player = str(pomo_sec["player"]).strip()
+
+                gt_sec = data.get("google_tasks") or data.get("google")
+                if gt_sec and isinstance(gt_sec, dict):
+                    if not google_client_id and "client_id" in gt_sec:
+                        google_client_id = str(gt_sec["client_id"]).strip()
+                    if not google_client_secret and "client_secret" in gt_sec:
+                        google_client_secret = str(gt_sec["client_secret"]).strip()
+                    if not google_credentials_file and "credentials_file" in gt_sec:
+                        google_credentials_file = Path(gt_sec["credentials_file"]).expanduser().resolve()
+                    if not google_token_path and "token_path" in gt_sec:
+                        google_token_path = Path(gt_sec["token_path"]).expanduser().resolve()
             except Exception:
                 # If config parsing fails, fallback gracefully to defaults
                 pass
+
+        # Defaults for Google Tasks credentials and token path
+        if not google_token_path:
+            google_token_path = config_dir / "google_token.json"
+
+        if not google_credentials_file:
+            # Check default candidate paths in config_dir
+            for candidate in [config_dir / "client_secret.json", config_dir / "credentials.json"]:
+                if candidate.exists():
+                    google_credentials_file = candidate
+                    break
+            if not google_credentials_file:
+                google_credentials_file = config_dir / "credentials.json"
 
         # Automatic fallback for Telegram session path if not explicitly configured
         if not telegram_session_path:
@@ -159,6 +214,10 @@ class Config:
             pomodoro_work_sound=pomodoro_work_sound,
             pomodoro_break_sound=pomodoro_break_sound,
             pomodoro_audio_player=pomodoro_audio_player,
+            google_client_id=google_client_id,
+            google_client_secret=google_client_secret,
+            google_credentials_file=google_credentials_file,
+            google_token_path=google_token_path,
         )
 
     @classmethod
@@ -186,4 +245,6 @@ class Config:
     def ensure_directories(self) -> None:
         """Ensure database and configuration directories exist."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.google_token_path:
+            self.google_token_path.parent.mkdir(parents=True, exist_ok=True)
 

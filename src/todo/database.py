@@ -103,6 +103,15 @@ CREATE TABLE IF NOT EXISTS pomodoro_state (
     current_session_index INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS google_task_lists_cache (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    updated TEXT,
+    etag TEXT,
+    cached_at TEXT,
+    updated_at TEXT NOT NULL
+);
 """
 
 INDEXES_SQL = """
@@ -113,11 +122,13 @@ CREATE INDEX IF NOT EXISTS idx_source_folders_rel_path ON source_folders(source_
 CREATE INDEX IF NOT EXISTS idx_file_items_source_id ON file_items(source_id);
 CREATE INDEX IF NOT EXISTS idx_file_items_folder_id ON file_items(source_id, folder_id);
 CREATE INDEX IF NOT EXISTS idx_file_items_rel_path ON file_items(source_id, relative_path);
+CREATE INDEX IF NOT EXISTS idx_file_items_path ON file_items(path);
 
 CREATE INDEX IF NOT EXISTS idx_tasks_source ON tasks(source_type, source_id);
 CREATE INDEX IF NOT EXISTS idx_daily_tasks_date ON daily_tasks(date);
 CREATE INDEX IF NOT EXISTS idx_daily_tasks_completed_at ON daily_tasks(completed_at);
 CREATE INDEX IF NOT EXISTS idx_telegram_cache_title ON telegram_channels_cache(title);
+CREATE INDEX IF NOT EXISTS idx_google_task_lists_cache_title ON google_task_lists_cache(title);
 CREATE INDEX IF NOT EXISTS idx_pomodoro_presets_name ON pomodoro_presets(name);
 """
 
@@ -185,6 +196,16 @@ class Database:
             dt_columns = {row["name"] for row in cursor.fetchall()}
             if "completed_at" not in dt_columns:
                 cursor.execute("ALTER TABLE daily_tasks ADD COLUMN completed_at TEXT")
+
+            # Migration check for google_task_lists_cache
+            cursor.execute("PRAGMA table_info(google_task_lists_cache)")
+            gtc_columns = {row["name"] for row in cursor.fetchall()}
+            if "updated" not in gtc_columns:
+                cursor.execute("ALTER TABLE google_task_lists_cache ADD COLUMN updated TEXT")
+            if "etag" not in gtc_columns:
+                cursor.execute("ALTER TABLE google_task_lists_cache ADD COLUMN etag TEXT")
+            if "cached_at" not in gtc_columns:
+                cursor.execute("ALTER TABLE google_task_lists_cache ADD COLUMN cached_at TEXT")
 
             # 3. Create all indexes safely now that tables and columns are guaranteed to exist
             conn.executescript(INDEXES_SQL)

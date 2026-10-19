@@ -13,6 +13,7 @@ from todo.integrations.youtube import YouTubeAdapter
 from todo.models import DailyTask
 from todo.services.audio_service import AudioService
 from todo.services.daily_service import DailyService
+from todo.services.google_tasks_service import GoogleTasksService
 from todo.services.pomodoro_service import PomodoroService
 from todo.services.pomodoro_timer import PomodoroTimer
 from todo.services.source_service import SourceService
@@ -28,9 +29,11 @@ from todo.ui.console import (
 )
 from todo.ui.filemeta_view import FilemetaView
 from todo.ui.focus_detector import FocusDetector
+from todo.ui.google_tasks_view import GoogleTasksView
 from todo.ui.key_reader import Key, key_reader
 from todo.ui.manual_view import ManualView
 from todo.ui.pomodoro_view import PomodoroView
+from todo.ui.task_editor import TaskEditor
 from todo.ui.telegram_view import TelegramView
 from todo.ui.timeline_view import TimelineView
 from todo.ui.today_view import TodayView
@@ -84,13 +87,31 @@ class TodoApp:
             self.task_service,
             self.daily_service,
         )
-        self.universal_view = UniversalView(self.task_service, self.daily_service)
+        self.google_tasks_service = GoogleTasksService(
+            db=self.db,
+            config=self.config,
+            date_provider=self.date_provider,
+        )
+        self.task_editor = TaskEditor(
+            task_service=self.task_service,
+            daily_service=self.daily_service,
+            google_tasks_service=self.google_tasks_service,
+        )
+        self.google_tasks_view = GoogleTasksView(
+            google_tasks_service=self.google_tasks_service,
+            daily_service=self.daily_service,
+            task_editor=self.task_editor,
+        )
+        self.universal_view = UniversalView(
+            self.task_service, self.daily_service, task_editor=self.task_editor
+        )
         self.manual_view = ManualView(self.task_service, self.daily_service)
         self.timeline_view = TimelineView(
             daily_service=self.daily_service,
             task_service=self.task_service,
             add_task_menu_fn=self.handle_add_task_menu,
             date_provider=self.date_provider,
+            task_editor=self.task_editor,
         )
 
         self.pomodoro_service = PomodoroService(self.db, date_provider=self.date_provider)
@@ -274,6 +295,24 @@ class TodoApp:
                         self.pomodoro_view.run()
                         continue
 
+                    if choice.lower() in ("e", "edit"):
+                        if tasks and 0 <= selected_idx < len(tasks):
+                            selected_daily = tasks[selected_idx]
+                            updated, msg = self.task_editor.edit_task(
+                                selected_daily.task, current_date=selected_daily.date
+                            )
+                            if updated:
+                                status_msg = msg
+                                status_style = "green"
+                            elif msg:
+                                status_msg = msg
+                                status_style = "yellow"
+                        continue
+
+                    if choice.lower() in ("g", "google", "gtasks"):
+                        self.google_tasks_view.run()
+                        continue
+
                     if choice.lower() in ("l", "timeline"):
                         self.timeline_view.run()
                         continue
@@ -331,7 +370,7 @@ class TodoApp:
                 continue
 
             if choice in (Key.DOWN, "down"):
-                selected_idx = min(4, selected_idx + 1)
+                selected_idx = min(5, selected_idx + 1)
                 continue
 
             if choice in (Key.ENTER, "enter"):
@@ -357,6 +396,10 @@ class TodoApp:
                 self.manual_view.run(target_date=target_date)
                 return None
 
+            elif choice in ("6", "g", "gtasks"):
+                self.google_tasks_view.run(target_date=target_date)
+                return None
+
             else:
-                add_status = "Invalid option. Please choose 1, 2, 3, 4, 5, or 'b' to go back."
+                add_status = "Invalid option. Please choose 1, 2, 3, 4, 5, 6, or 'b' to go back."
 

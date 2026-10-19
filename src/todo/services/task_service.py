@@ -237,6 +237,73 @@ class TaskService:
         )
         return task, True
 
+    def update_task(
+        self,
+        task_id: int,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> Optional[Task]:
+        """
+        Update task title and/or description.
+        Preserves id, status, created_at, and foreign links.
+        If the task is linked to a FileItem, update file_items title as well.
+        Returns the updated Task entity, or None if task not found.
+        """
+        now = self.get_now().isoformat()
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, title, description, source_type, source_id, status, created_at, updated_at
+                FROM tasks
+                WHERE id = ?
+                """,
+                (task_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            new_title = title.strip() if title is not None else row["title"]
+            if not new_title:
+                raise ValueError("Task title cannot be empty.")
+            new_desc = description.strip() if description is not None else (row["description"] or "")
+
+            cursor.execute(
+                """
+                UPDATE tasks
+                SET title = ?, description = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (new_title, new_desc, now, task_id),
+            )
+            conn.commit()
+
+        # If linked to a FileItem, update file_items title
+        if row["source_id"] and row["source_type"] in ("filemeta", "telegram", "youtube", "google_tasks"):
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE file_items
+                    SET title = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (new_title, now, row["source_id"]),
+                )
+                conn.commit()
+
+        return Task(
+            id=row["id"],
+            title=new_title,
+            description=new_desc,
+            source_type=row["source_type"],
+            source_id=row["source_id"],
+            status=row["status"],
+            created_at=row["created_at"],
+            updated_at=now,
+        )
+
     def update_task_status(self, task_id: int, status: str) -> None:
         """Update the base status of a task and sync with FileItem if applicable."""
         now = self.get_now().isoformat()
@@ -254,7 +321,7 @@ class TaskService:
             )
             conn.commit()
 
-        if row and row["source_type"] in ("filemeta", "telegram", "youtube") and row["source_id"]:
+        if row and row["source_type"] in ("filemeta", "telegram", "youtube", "google_tasks") and row["source_id"]:
             from todo.services.source_service import SourceService
 
             SourceService(self.db, date_provider=self.date_provider).set_item_completion(

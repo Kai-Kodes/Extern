@@ -190,9 +190,9 @@ def read_key(timeout: Optional[float] = None) -> Optional[str]:
     return key_reader.read_key(timeout=timeout)
 
 
-def prompt_input(prompt_text: str = "> ") -> str:
+def prompt_input(prompt_text: str = "> ", prefill: str = "") -> str:
     """
-    Prompt user for full line input with cursor shown via KeyReader.
+    Prompt user for full line input with cursor shown via KeyReader, optionally with prefill.
     """
-    return key_reader.read_text_input(prompt_text)
+    return key_reader.read_text_input(prompt_text, prefill=prefill)
 

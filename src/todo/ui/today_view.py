@@ -138,6 +138,7 @@ class TodayView:
                     ("↑/↓", "Navigate"),
                     ("Enter", "Toggle"),
                     ("+", "Add task"),
+                    ("e", "Edit"),
                     ("l", "Timeline"),
                     ("d", "Delete"),
                     ("m", "Move to Universal"),
@@ -239,15 +240,15 @@ class TodayView:
                 return None
             return None
 
-        # 2. Filemeta / Telegram / YouTube task deletion semantics
-        elif task and task.source_type in ("filemeta", "telegram", "youtube"):
+        # 2. Filemeta / Telegram / YouTube / Google Tasks deletion semantics
+        elif task and task.source_type in ("filemeta", "telegram", "youtube", "google_tasks"):
             clear_viewport()
             render_header("REMOVE FROM TODAY", subtitle=title)
             console.print(
                 f"Remove [bold white]\"{title}\"[/bold white] from today\'s schedule?"
             )
             console.print(
-                "[dim]The course item will remain untouched.[/dim]\n"
+                "[dim]The source item will remain untouched.[/dim]\n"
             )
             render_footer([("y", "Yes, remove"), ("n", "Cancel")])
             conf = key_reader.read_key()

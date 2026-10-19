@@ -2,7 +2,7 @@
 
 import calendar
 from datetime import date, datetime, timedelta
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 from rich.table import Table
 from rich.text import Text
@@ -28,11 +28,13 @@ class TimelineView:
         task_service: TaskService,
         add_task_menu_fn: Optional[Callable[[Optional[str]], None]] = None,
         date_provider: Optional[Callable[[], datetime]] = None,
+        task_editor: Optional[Any] = None,
     ):
         self.daily_service = daily_service
         self.task_service = task_service
         self.add_task_menu_fn = add_task_menu_fn
         self.date_provider = date_provider
+        self.task_editor = task_editor
 
     def get_today(self) -> date:
         """Return today's date from daily_service or injected clock."""
@@ -201,10 +203,11 @@ class TimelineView:
                 if domain == "past":
                     hints.extend(
                         [
+                            ("Enter", "Inspect"),
+                            ("e", "Edit"),
                             ("t", "Today"),
                             ("g", "Go to date"),
                             ("/", "Search"),
-                            ("Enter", "Inspect"),
                             ("b", "Back"),
                         ]
                     )
@@ -213,6 +216,7 @@ class TimelineView:
                         [
                             ("+", "Add task"),
                             ("Enter", "Toggle"),
+                            ("e", "Edit"),
                             ("g", "Go to date"),
                             ("/", "Search"),
                             ("b", "Back"),
@@ -223,6 +227,7 @@ class TimelineView:
                         [
                             ("+", "Schedule"),
                             ("Enter", "Manage"),
+                            ("e", "Edit"),
                             ("t", "Today"),
                             ("g", "Go to date"),
                             ("/", "Search"),
@@ -339,6 +344,20 @@ class TimelineView:
                         status_msg = msg
                 continue
 
+            # Edit task: 'e'
+            if k in ("e", "edit") and active_tasks and self.task_editor:
+                selected_dt = active_tasks[selected_idx]
+                updated, msg = self.task_editor.edit_task(
+                    selected_dt.task, current_date=date_str
+                )
+                if updated:
+                    status_msg = msg
+                    status_style = "bold green"
+                elif msg:
+                    status_msg = msg
+                    status_style = "bold yellow"
+                continue
+
             # Quick removal on future dates: 'd'
             if k in ("d", "delete") and active_tasks:
                 selected_dt = active_tasks[selected_idx]
@@ -407,6 +426,9 @@ class TimelineView:
             ("3.", "Move to Universal Tasks"),
             ("4.", "Remove from schedule"),
         ]
+        if self.task_editor:
+            options.append(("5.", "Edit task details"))
+
         sel_idx = 0
         while True:
             clear_viewport()
@@ -426,10 +448,11 @@ class TimelineView:
 
             console.print(table)
             console.print()
+            footer_keys = f"Enter / 1-{len(options)}"
             render_footer(
                 [
                     ("↑/↓", "Navigate"),
-                    ("Enter / 1-4", "Select"),
+                    (footer_keys, "Select"),
                     ("b / Esc", "Cancel"),
                 ]
             )
@@ -488,3 +511,8 @@ class TimelineView:
             elif choice_num == 4:
                 self.daily_service.remove_daily_task(dt.id)
                 return "Removed task from schedule."
+
+            elif choice_num == 5 and self.task_editor:
+                updated, msg = self.task_editor.edit_task(dt.task, current_date=current_date_str)
+                return msg
+

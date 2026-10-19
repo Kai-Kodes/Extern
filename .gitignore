@@ -53,6 +53,11 @@ venv.bak/
 config.local.toml
 *.env
 .env.*
+*google_credentials*.json
+*google_token*.json
+client_secret*.json
+credentials.json
+token.json
 
 # Testing & coverage
 .pytest_cache/

@@ -298,7 +298,7 @@ class DailyService:
             conn.commit()
 
         # Two-way sync: if originated from a FileItem, update its completed state
-        if source_type in ("filemeta", "telegram", "youtube") and source_id:
+        if source_type in ("filemeta", "telegram", "youtube", "google_tasks") and source_id:
             from todo.services.source_service import SourceService
             SourceService(self.db, date_provider=self.date_provider).set_item_completion(source_id, is_completed)
 
@@ -679,3 +679,34 @@ class DailyService:
         )
         dt, _ = self.add_task_to_date(task.id, date_str)
         return dt
+
+    def get_task_scheduled_date(self, task_id: int) -> Optional[str]:
+        """Get the current scheduled date for a task if active/pending."""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT date FROM daily_tasks
+                WHERE task_id = ? AND completed_at IS NULL
+                ORDER BY date DESC, id DESC
+                LIMIT 1
+                """,
+                (task_id,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return row["date"]
+            return None
+
+    def unschedule_task(self, task_id: int) -> bool:
+        """Remove any active/pending daily schedule entries for a task without deleting the task entity."""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM daily_tasks WHERE task_id = ? AND completed_at IS NULL",
+                (task_id,),
+            )
+            deleted = cursor.rowcount > 0
+            conn.commit()
+            return deleted
+

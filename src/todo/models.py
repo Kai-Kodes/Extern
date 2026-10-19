@@ -44,6 +44,8 @@ class Source:
             return "telegram"
         if self.path.startswith("youtube://"):
             return "youtube"
+        if self.path.startswith("google_tasks://"):
+            return "google_tasks"
         return "filemeta"
 
     @property

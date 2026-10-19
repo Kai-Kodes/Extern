@@ -677,7 +677,7 @@ class SourceService:
             # Two-way sync: update associated task if it exists
             new_status = "completed" if new_completed else "pending"
             cursor.execute(
-                "SELECT id FROM tasks WHERE source_type IN ('filemeta', 'telegram', 'youtube') AND source_id = ?",
+                "SELECT id FROM tasks WHERE source_type IN ('filemeta', 'telegram', 'youtube', 'google_tasks') AND source_id = ?",
                 (item_id,),
             )
             tasks = cursor.fetchall()

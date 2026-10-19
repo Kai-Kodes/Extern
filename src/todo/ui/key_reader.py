@@ -175,15 +175,19 @@ class KeyReader:
             if not was_active:
                 self.exit()
 
-    def read_text_input(self, prompt_text: str = "> ") -> str:
+    def read_text_input(self, prompt_text: str = "> ", prefill: str = "") -> str:
         """
         Temporarily pause cbreak mode to read a line of text, then resume cbreak mode.
+        If prefill is provided, prepopulates the text input buffer with existing text.
         """
         if not sys.stdin.isatty():
             line = sys.stdin.readline()
             if not line:
                 raise EOFError()
-            return line.strip()
+            text = line.rstrip("\r\n")
+            if text == "" and prefill:
+                return prefill
+            return text
 
         # Temporarily restore normal terminal mode for line input
         from todo.ui.console import console
@@ -194,7 +198,23 @@ class KeyReader:
 
         console.show_cursor(True)
         try:
-            val = console.input(prompt_text).strip()
+            try:
+                import readline
+                if prefill:
+                    readline.set_startup_hook(lambda: readline.insert_text(prefill))
+                else:
+                    readline.set_startup_hook(None)
+            except Exception:
+                readline = None
+
+            try:
+                val = console.input(prompt_text).strip()
+            finally:
+                if readline is not None:
+                    try:
+                        readline.set_startup_hook(None)
+                    except Exception:
+                        pass
         finally:
             console.show_cursor(False)
             if was_active:
