@@ -2,12 +2,14 @@
 
 import atexit
 import contextlib
+import io
+import re
 import select
 import sys
 import termios
 import tty
 from datetime import date, datetime
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 from rich import box
 from rich.console import Console
@@ -18,6 +20,66 @@ from rich.text import Text
 from todo.ui.key_reader import Key, KeyReader, key_reader
 
 console = Console()
+
+
+def render_readline_prompt(
+    console_instance: Console, prompt: Any, markup: bool = True, emoji: bool = True
+) -> str:
+    """
+    Render a prompt string or Rich renderable into an ANSI string with GNU Readline
+    non-printing sequence markers (\\001 and \\002) so Readline correctly calculates
+    prompt width and cursor position without line-wrapping, drift, or erasure.
+    """
+    if not prompt:
+        return ""
+
+    if isinstance(prompt, str) and "[" not in prompt and "\x1b" not in prompt:
+        return prompt
+
+    buf = io.StringIO()
+    cs = console_instance.color_system or "standard"
+    temp_console = Console(file=buf, force_terminal=True, color_system=cs, no_color=False)
+    temp_console.print(prompt, markup=markup, emoji=emoji, end="")
+    rendered = buf.getvalue()
+
+    if "\x1b" not in rendered:
+        return rendered
+
+    clean = rendered.replace("\001", "").replace("\002", "")
+    return re.sub(r"(\x1b\[[0-9;]*[a-zA-Z])", r"\001\1\002", clean)
+
+
+def _safe_console_input(
+    prompt: Any = "",
+    *,
+    markup: bool = True,
+    emoji: bool = True,
+    password: bool = False,
+    stream: Optional[Any] = None,
+) -> str:
+    """
+    Drop-in replacement for Console.input that passes the rendered prompt
+    directly to GNU readline / Python input() rather than printing it separately
+    with an empty readline prompt. This prevents GNU readline from overwriting or
+    erasing the prompt during backspaces, typing, line wrapping, or empty-input states.
+    """
+    if stream:
+        if prompt:
+            console.print(prompt, markup=markup, emoji=emoji, end="")
+        return stream.readline()
+
+    prompt_str = render_readline_prompt(console, prompt, markup=markup, emoji=emoji) if prompt else ""
+
+    if password:
+        import getpass
+
+        return getpass.getpass(prompt_str)
+
+    return input(prompt_str)
+
+
+# Attach drop-in safe input method to Console instance
+console.input = _safe_console_input
 
 # Keep track of alt-screen state to ensure restoration on exit
 _IN_ALT_SCREEN = False
