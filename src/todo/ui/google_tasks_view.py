@@ -4,9 +4,16 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import requests
 from rich.table import Table
 from rich.text import Text
 
+from todo.integrations.google_tasks import (
+    GoogleTasksAPIError,
+    GoogleTasksAuthError,
+    GoogleTasksNetworkError,
+    GoogleTasksNotFoundError,
+)
 from todo.models import Task
 from todo.search import LiveSearchController
 from todo.services.daily_service import DailyService
@@ -31,10 +38,12 @@ class GoogleTasksView:
         google_tasks_service: GoogleTasksService,
         daily_service: DailyService,
         task_editor: Optional[TaskEditor] = None,
+        sync_manager: Optional[Any] = None,
     ):
         self.google_tasks_service = google_tasks_service
         self.daily_service = daily_service
         self.task_editor = task_editor
+        self.sync_manager = sync_manager
 
     def run(self, target_date: Optional[str] = None) -> None:
         """Main entry point for Google Tasks screen."""
@@ -52,8 +61,15 @@ class GoogleTasksView:
             if not connected and not self.google_tasks_service.get_cached_task_lists():
                 return
 
-        # 3. Synchronize task lists
-        lists, is_offline = self.google_tasks_service.sync_task_lists()
+        # 3. Retrieve task lists from local cache first (instant < 5ms)
+        lists = self.google_tasks_service.get_cached_task_lists()
+        if not lists:
+            # First run with empty cache: fetch lists
+            lists, is_offline = self.google_tasks_service.sync_task_lists()
+
+        if self.sync_manager:
+            self.sync_manager.trigger_sync()
+
         if not lists:
             clear_viewport()
             render_header("GOOGLE TASKS")
@@ -65,7 +81,7 @@ class GoogleTasksView:
                 new_title = prompt_input("New list title: ").strip()
                 if new_title:
                     self.google_tasks_service.get_source_for_list("@default", new_title)
-                    lists, is_offline = self.google_tasks_service.sync_task_lists()
+                    lists, _ = self.google_tasks_service.sync_task_lists()
             else:
                 return
 
@@ -80,11 +96,41 @@ class GoogleTasksView:
         status_style = "green"
 
         while True:
-            # Sync tasks for current list
-            tasks, is_offline = self.google_tasks_service.sync_tasks_for_list(current_list["id"])
+            # 4. Instant local-first retrieval (< 5ms): only pending tasks are fetched
+            # Completed tasks are hidden from active views but preserved in SQLite and Timeline.
+            try:
+                if self.sync_manager:
+                    tasks = self.google_tasks_service.get_tasks_for_list(current_list["id"], include_completed=False)
+                else:
+                    self.google_tasks_service.sync_tasks_for_list(current_list["id"])
+                    tasks = self.google_tasks_service.get_tasks_for_list(current_list["id"], include_completed=False)
+            except GoogleTasksNotFoundError as e:
+                status_msg = f"Task list '{current_list.get('title')}' was not found on Google Tasks (pruned from cache)."
+                status_style = "bold yellow"
+                lists, _ = self.google_tasks_service.sync_task_lists()
+                if not lists:
+                    clear_viewport()
+                    render_header("GOOGLE TASKS")
+                    print_status_message(status_msg, style=status_style)
+                    console.print("\nNo other task lists available on Google Tasks.\n")
+                    render_footer([("b", "Back")])
+                    prompt_input("Press Enter to return...")
+                    return
+                current_list_idx = 0
+                current_list = lists[current_list_idx]
+                selected_idx = 0
+                continue
+            except Exception:
+                tasks = self.google_tasks_service.get_tasks_for_list(current_list["id"], include_completed=False)
 
             clear_viewport()
-            sub_status = "● Offline mode (cached)" if is_offline else "● Connected"
+            if self.sync_manager:
+                sub_status = self.sync_manager.get_status_text()
+            elif self.google_tasks_service.is_authenticated():
+                sub_status = "● Connected"
+            else:
+                sub_status = "● Offline mode (cached)"
+
             subtitle = f"{current_list.get('title', 'Tasks')} · {sub_status}"
             render_header("GOOGLE TASKS", subtitle=subtitle)
 
@@ -104,14 +150,13 @@ class GoogleTasksView:
                 if search.query:
                     console.print("  [dim]No tasks matching search filter.[/dim]\n")
                 else:
-                    console.print("  [dim]No tasks in this list. Press '+' to add a task.[/dim]\n")
+                    console.print("  [dim]No active tasks in this list. Press '+' to add a task.[/dim]\n")
             else:
                 if selected_idx >= len(active_tasks):
                     selected_idx = max(0, len(active_tasks) - 1)
 
                 table = Table.grid(padding=(0, 1))
                 table.add_column("cursor", justify="right", style="cyan bold", width=2)
-                table.add_column("chk", justify="center", width=4)
                 table.add_column("num", justify="right", style="cyan bold", width=4)
                 table.add_column("title", style="bold white")
                 table.add_column("due", style="cyan", width=16)
@@ -119,7 +164,6 @@ class GoogleTasksView:
 
                 for idx, t in enumerate(active_tasks):
                     cursor = "▶" if idx == selected_idx else " "
-                    chk = Text("[x]", style="bold green") if t.status == "completed" else Text("[ ]", style="dim")
                     num_str = f"{idx + 1}."
 
                     # Parse due date if scheduled in daily_tasks or metadata
@@ -129,8 +173,7 @@ class GoogleTasksView:
                     # Truncate notes
                     notes_preview = t.description[:35] + "..." if len(t.description) > 35 else t.description
 
-                    t_style = "dim strike" if t.status == "completed" else "bold white"
-                    table.add_row(cursor, chk, num_str, Text(t.title, style=t_style), due_str, notes_preview)
+                    table.add_row(cursor, num_str, Text(t.title, style="bold white"), due_str, notes_preview)
 
                 console.print(table)
                 console.print()
@@ -141,7 +184,7 @@ class GoogleTasksView:
             elif search.query:
                 render_footer([
                     ("↑/↓", "Navigate"),
-                    ("Enter", "Toggle"),
+                    ("Enter", "Complete"),
                     ("Space", "Schedule"),
                     ("Esc", "Clear search"),
                     ("b", "Back"),
@@ -149,7 +192,7 @@ class GoogleTasksView:
             else:
                 render_footer([
                     ("↑/↓", "Navigate"),
-                    ("Enter", "Toggle"),
+                    ("Enter", "Complete"),
                     ("Space", "Schedule"),
                     ("+", "Add task"),
                     ("e", "Edit"),
@@ -161,7 +204,10 @@ class GoogleTasksView:
                     ("b", "Back"),
                 ])
 
-            k = key_reader.read_key()
+            k = key_reader.read_key(timeout=0.2)
+            if k is None:
+                # Refresh render on background state change or timer
+                continue
 
             if search.is_active:
                 handled, selected_idx = search.handle_key(k, len(active_tasks), selected_idx)
@@ -241,9 +287,21 @@ class GoogleTasksView:
 
             # Refresh / Sync
             if k in ("r", "sync"):
-                lists, is_offline = self.google_tasks_service.sync_task_lists()
-                status_msg = "Synced with Google Tasks." if not is_offline else "Offline · loaded from cache."
-                status_style = "green" if not is_offline else "yellow"
+                if self.sync_manager:
+                    self.sync_manager.trigger_sync()
+                    status_msg = "Background sync initiated."
+                    status_style = "green"
+                else:
+                    lists, is_offline = self.google_tasks_service.sync_task_lists()
+                    if not lists:
+                        status_msg = "No task lists found on Google Tasks."
+                        status_style = "yellow"
+                    else:
+                        if current_list_idx >= len(lists):
+                            current_list_idx = 0
+                        current_list = lists[current_list_idx]
+                        status_msg = "Synced with Google Tasks." if not is_offline else "Offline · loaded from cache."
+                        status_style = "green" if not is_offline else "yellow"
                 continue
 
             # Switch lists
@@ -315,12 +373,18 @@ class GoogleTasksView:
         except Exception:
             pass
 
-        code_input = prompt_input("Code / Redirect URL (or 'b' to cancel): ").strip()
-        if not code_input or code_input.lower() in ("b", "back", "cancel", "q"):
+        code_input = prompt_input("Code / Redirect URL (or 'b' to cancel, Enter if authorized in browser): ").strip()
+        code_to_exchange = None
+        if code_input and code_input.lower() not in ("b", "back", "cancel", "q"):
+            code_to_exchange = code_input
+        elif not code_input and captured:
+            code_to_exchange = captured[0]
+
+        if not code_to_exchange or (code_input and code_input.lower() in ("b", "back", "cancel", "q")):
             return False
 
         try:
-            self.google_tasks_service.oauth_manager.exchange_code(code_input, redirect_uri)
+            self.google_tasks_service.oauth_manager.exchange_code(code_to_exchange, redirect_uri)
             clear_viewport()
             render_header("GOOGLE TASKS CONNECTED")
             console.print("[bold green]Successfully authenticated with Google Tasks![/bold green]\n")

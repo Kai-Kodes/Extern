@@ -1,7 +1,8 @@
 """Service for managing daily scheduled tasks."""
 
+import json
 from datetime import datetime
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from todo.database import Database
 from todo.models import DailyTask, Task
@@ -12,9 +13,11 @@ class DailyService:
         self,
         db: Database,
         date_provider: Optional[Callable[[], datetime]] = None,
+        google_tasks_service: Optional[Any] = None,
     ):
         self.db = db
         self.date_provider = date_provider
+        self.google_tasks_service = google_tasks_service
 
     def get_now(self) -> datetime:
         """Return the current datetime, supporting injected test clocks."""
@@ -241,6 +244,11 @@ class DailyService:
         # Retrieve created task info
         from todo.services.task_service import TaskService
         task = TaskService(self.db, date_provider=self.date_provider).get_task_by_id(task_id)
+
+        # If it is a Google task, sync or queue its due date
+        if task and task.source_type == "google_tasks" and task.source_id:
+            self._set_google_task_due_date(task.id, task.source_id, date_str)
+
         dt = DailyTask(
             id=daily_id,
             task_id=task_id,
@@ -302,6 +310,10 @@ class DailyService:
             from todo.services.source_service import SourceService
             SourceService(self.db, date_provider=self.date_provider).set_item_completion(source_id, is_completed)
 
+        # Propagate completion to Google Tasks or outbox
+        if source_type == "google_tasks" and source_id:
+            self._sync_google_task_completion(task_id, source_id, is_completed)
+
         # Fetch updated task
         from todo.services.task_service import TaskService
         task = TaskService(self.db, date_provider=self.date_provider).get_task_by_id(task_id)
@@ -317,8 +329,8 @@ class DailyService:
     def move_tasks_to_universal_bulk(self, daily_task_ids: List[int]) -> int:
         """
         Move daily tasks to Universal Tasks:
-        - Sets task source_type to 'universal'
-        - Preserves task ID, title, description, source_id, created_at
+        - For standard tasks: sets task source_type to 'universal'
+        - For Google Tasks: retains source_type='google_tasks', clears remote due date
         - Removes active (pending) daily_tasks schedule entries so it disappears from Today and does not carry forward
         - Preserves completed historical daily_tasks entries
         - Transactional
@@ -341,17 +353,28 @@ class DailyService:
             task_ids = [r["task_id"] for r in rows]
             task_placeholders = ",".join("?" for _ in task_ids)
 
-            # 1. Update task source_type to 'universal'
+            # Query source_type and source_id for these tasks
             cursor.execute(
-                f"""
-                UPDATE tasks
-                SET source_type = 'universal', updated_at = ?
-                WHERE id IN ({task_placeholders})
-                """,
-                [now] + task_ids,
+                f"SELECT id, source_type, source_id FROM tasks WHERE id IN ({task_placeholders})",
+                task_ids,
             )
+            t_rows = cursor.fetchall()
+            google_task_items = [(r["id"], r["source_id"]) for r in t_rows if r["source_type"] == "google_tasks"]
+            other_task_ids = [r["id"] for r in t_rows if r["source_type"] != "google_tasks"]
 
-            # 2. Delete pending daily_tasks entries for these tasks
+            # 1. Update non-Google tasks to 'universal'
+            if other_task_ids:
+                other_ph = ",".join("?" for _ in other_task_ids)
+                cursor.execute(
+                    f"""
+                    UPDATE tasks
+                    SET source_type = 'universal', updated_at = ?
+                    WHERE id IN ({other_ph})
+                    """,
+                    [now] + other_task_ids,
+                )
+
+            # 2. Delete pending daily_tasks entries for all selected tasks
             cursor.execute(
                 f"""
                 DELETE FROM daily_tasks
@@ -369,7 +392,145 @@ class DailyService:
                 daily_task_ids,
             )
             conn.commit()
-            return len(task_ids)
+
+        # 4. For Google tasks, clear due date locally and on remote / outbox
+        for t_id, s_id in google_task_items:
+            self._clear_google_task_due_date(t_id, s_id)
+
+        return len(task_ids)
+
+    def _sync_google_task_completion(self, task_id: int, source_id: Optional[int], is_completed: bool) -> None:
+        """Propagate completion toggle to Google Tasks API or enqueue in outbox."""
+        if not source_id:
+            return
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT path, metadata FROM file_items WHERE id = ?", (source_id,))
+            fi_row = cursor.fetchone()
+        if not fi_row:
+            return
+        remote_id = fi_row["path"]
+        meta = json.loads(fi_row["metadata"] or "{}")
+        list_id = meta.get("list_id", "@default")
+        now_iso = self.get_now().isoformat()
+        action = "complete" if is_completed else "reopen"
+        payload = {"list_id": list_id, "task_id": remote_id}
+
+        pushed = False
+        g_svc = getattr(self, "google_tasks_service", None)
+        if g_svc and g_svc.is_authenticated() and not remote_id.startswith("local_"):
+            try:
+                g_svc.client.set_task_completed(list_id=list_id, task_id=remote_id, completed=is_completed)
+                pushed = True
+            except Exception:
+                pushed = False
+
+        if not pushed and not remote_id.startswith("local_"):
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO google_tasks_outbox (task_id, action, payload, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (task_id, action, json.dumps(payload, ensure_ascii=False), now_iso),
+                )
+                conn.commit()
+
+    def _set_google_task_due_date(self, task_id: int, source_id: Optional[int], date_str: str) -> None:
+        """Update due date for a Google Task when scheduled into daily_tasks."""
+        if not source_id:
+            return
+        from todo.integrations.google_tasks import format_rfc3339_due_date
+        now_iso = self.get_now().isoformat()
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT path, metadata FROM file_items WHERE id = ?", (source_id,))
+            fi_row = cursor.fetchone()
+            if not fi_row:
+                return
+            remote_id = fi_row["path"]
+            meta = json.loads(fi_row["metadata"] or "{}")
+            list_id = meta.get("list_id", "@default")
+            meta["due"] = format_rfc3339_due_date(date_str)
+            cursor.execute(
+                "UPDATE file_items SET metadata = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(meta, ensure_ascii=False), now_iso, source_id),
+            )
+            conn.commit()
+
+        pushed = False
+        g_svc = getattr(self, "google_tasks_service", None)
+        if g_svc and g_svc.is_authenticated() and not remote_id.startswith("local_"):
+            try:
+                g_svc.client.update_task(list_id=list_id, task_id=remote_id, due_date=date_str)
+                pushed = True
+            except Exception:
+                pushed = False
+
+        if not pushed and not remote_id.startswith("local_"):
+            payload = {
+                "list_id": list_id,
+                "task_id": remote_id,
+                "due_date": date_str,
+            }
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO google_tasks_outbox (task_id, action, payload, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (task_id, "update", json.dumps(payload, ensure_ascii=False), now_iso),
+                )
+                conn.commit()
+
+    def _clear_google_task_due_date(self, task_id: int, source_id: Optional[int]) -> None:
+        """Clear due date for a Google Task when moved to universal."""
+        if not source_id:
+            return
+        now_iso = self.get_now().isoformat()
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT path, metadata FROM file_items WHERE id = ?", (source_id,))
+            fi_row = cursor.fetchone()
+            if not fi_row:
+                return
+            remote_id = fi_row["path"]
+            meta = json.loads(fi_row["metadata"] or "{}")
+            list_id = meta.get("list_id", "@default")
+            meta["due"] = None
+            cursor.execute(
+                "UPDATE file_items SET metadata = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(meta, ensure_ascii=False), now_iso, source_id),
+            )
+            conn.commit()
+
+        pushed = False
+        g_svc = getattr(self, "google_tasks_service", None)
+        if g_svc and g_svc.is_authenticated() and not remote_id.startswith("local_"):
+            try:
+                g_svc.client.update_task(list_id=list_id, task_id=remote_id, clear_due=True)
+                pushed = True
+            except Exception:
+                pushed = False
+
+        if not pushed and not remote_id.startswith("local_"):
+            payload = {
+                "list_id": list_id,
+                "task_id": remote_id,
+                "clear_due": True,
+            }
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO google_tasks_outbox (task_id, action, payload, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (task_id, "update", json.dumps(payload, ensure_ascii=False), now_iso),
+                )
+                conn.commit()
 
     def move_task_to_universal(self, daily_task_id: int) -> bool:
         """Move a single daily task to Universal Tasks."""

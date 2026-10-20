@@ -82,14 +82,24 @@ class TaskService:
         )
 
     def get_universal_tasks(self) -> List[Task]:
-        """Retrieve all universal tasks."""
+        """
+        Retrieve all universal tasks.
+        Includes user universal tasks and pending Google tasks without an active daily schedule.
+        """
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT id, title, description, source_type, source_id, status, created_at, updated_at
                 FROM tasks
-                WHERE source_type = 'universal'
+                WHERE (source_type = 'universal')
+                   OR (
+                       source_type = 'google_tasks'
+                       AND status = 'pending'
+                       AND id NOT IN (
+                           SELECT task_id FROM daily_tasks WHERE completed_at IS NULL
+                       )
+                   )
                 ORDER BY created_at ASC
                 """
             )

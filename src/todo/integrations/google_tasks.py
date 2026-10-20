@@ -38,6 +38,12 @@ class GoogleTasksAPIError(GoogleTasksError):
         self.response_body = response_body
 
 
+class GoogleTasksNotFoundError(GoogleTasksAPIError):
+    """Raised when a requested resource (e.g. task list or task) is not found (HTTP 404)."""
+    def __init__(self, message: str, response_body: Optional[str] = None):
+        super().__init__(message, status_code=404, response_body=response_body)
+
+
 def format_rfc3339_due_date(date_str: str) -> str:
     """
     Format a YYYY-MM-DD date string to RFC 3339 UTC midnight format.
@@ -217,7 +223,12 @@ class GoogleOAuthManager:
                 tmp_path.unlink()
             raise GoogleTasksAuthError(f"Failed to persist token file: {e}")
 
-    def get_authorization_url(self, redirect_uri: str, state: Optional[str] = None) -> str:
+    def get_authorization_url(
+        self,
+        redirect_uri: str,
+        state: Optional[str] = None,
+        login_hint: Optional[str] = None,
+    ) -> str:
         """Build Google OAuth 2.0 authorization URL."""
         c_id, _ = self.get_credentials()
         if not c_id:
@@ -233,6 +244,8 @@ class GoogleOAuthManager:
         }
         if state:
             params["state"] = state
+        if login_hint:
+            params["login_hint"] = login_hint
         return f"{self.AUTH_URL}?{urllib.parse.urlencode(params)}"
 
     def exchange_code(self, code_or_url: str, redirect_uri: str) -> GoogleOAuthTokens:
@@ -387,6 +400,8 @@ class GoogleTasksClient:
                 raise GoogleTasksNetworkError(f"Network connection failed on retry: {e}")
             except GoogleTasksAuthError:
                 raise GoogleTasksAuthError("Session expired. Please reconnect Google Tasks.")
+            if resp.status_code == 401:
+                raise GoogleTasksAuthError("Unauthorized: Invalid or revoked Google Tasks token.")
 
         if resp.status_code in (200, 201):
             if resp.content:
@@ -398,7 +413,7 @@ class GoogleTasksClient:
         elif resp.status_code == 204:
             return {}
         elif resp.status_code == 404:
-            raise GoogleTasksAPIError(f"Resource not found: {path}", status_code=404)
+            raise GoogleTasksNotFoundError(f"Resource not found: {path}", response_body=resp.text)
         else:
             raise GoogleTasksAPIError(
                 f"Google Tasks API error ({resp.status_code}): {resp.text}",
@@ -515,11 +530,12 @@ class GoogleTasksClient:
 def run_loopback_auth_server(
     oauth_manager: GoogleOAuthManager,
     timeout_seconds: int = 120,
-) -> Tuple[str, Optional[GoogleOAuthTokens]]:
+    login_hint: Optional[str] = None,
+) -> Tuple[str, str, List[str]]:
     """
     Launch a local HTTP loopback server on an ephemeral port,
     generate the auth URL, and wait for redirect.
-    Returns (auth_url, tokens_or_none).
+    Returns (auth_url, redirect_uri, captured_code).
     """
     captured_code: List[str] = []
     server_error: List[str] = []
@@ -557,7 +573,7 @@ def run_loopback_auth_server(
     server.timeout = 1.0
     port = server.server_port
     redirect_uri = f"http://127.0.0.1:{port}/"
-    auth_url = oauth_manager.get_authorization_url(redirect_uri)
+    auth_url = oauth_manager.get_authorization_url(redirect_uri, login_hint=login_hint)
 
     def serve():
         start = time.time()

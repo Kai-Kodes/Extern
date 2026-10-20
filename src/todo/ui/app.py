@@ -14,6 +14,7 @@ from todo.models import DailyTask
 from todo.services.audio_service import AudioService
 from todo.services.daily_service import DailyService
 from todo.services.google_tasks_service import GoogleTasksService
+from todo.services.google_tasks_sync_manager import GoogleTasksSyncManager
 from todo.services.pomodoro_service import PomodoroService
 from todo.services.pomodoro_timer import PomodoroTimer
 from todo.services.source_service import SourceService
@@ -92,6 +93,12 @@ class TodoApp:
             config=self.config,
             date_provider=self.date_provider,
         )
+        self.google_tasks_sync_manager = GoogleTasksSyncManager(
+            google_tasks_service=self.google_tasks_service,
+            interval=60.0,
+            date_provider=self.date_provider,
+        )
+        self.daily_service.google_tasks_service = self.google_tasks_service
         self.task_editor = TaskEditor(
             task_service=self.task_service,
             daily_service=self.daily_service,
@@ -101,6 +108,7 @@ class TodoApp:
             google_tasks_service=self.google_tasks_service,
             daily_service=self.daily_service,
             task_editor=self.task_editor,
+            sync_manager=self.google_tasks_sync_manager,
         )
         self.universal_view = UniversalView(
             self.task_service, self.daily_service, task_editor=self.task_editor
@@ -135,9 +143,11 @@ class TodoApp:
     def run(self) -> None:
         """Run the main interactive application loop inside the alternate terminal screen."""
         try:
+            self.google_tasks_sync_manager.start()
             with tui_mode():
                 self._main_loop()
         finally:
+            self.google_tasks_sync_manager.stop()
             self.telegram_adapter.disconnect()
 
     def _main_loop(self) -> None:
@@ -179,7 +189,13 @@ class TodoApp:
                 status_msg = None
                 status_style = "green"
 
-                choice = read_key()
+                choice = read_key(timeout=0.5)
+                if choice is None:
+                    # Timeout elapsed: check date rollover and refresh if date changed
+                    cur_today = self.daily_service.get_today_str()
+                    if cur_today != today_str:
+                        continue
+                    continue
 
                 if mode == "delete":
                     if choice in (Key.ESCAPE, "escape", "q", "cancel"):

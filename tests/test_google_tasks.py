@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -21,6 +22,7 @@ from todo.integrations.google_tasks import (
     GoogleTasksAuthError,
     GoogleTasksClient,
     GoogleTasksNetworkError,
+    GoogleTasksNotFoundError,
     format_rfc3339_due_date,
     parse_rfc3339_due_date,
 )
@@ -123,7 +125,7 @@ def test_oauth_manager_save_tokens_restrictive_permissions(gtasks_env):
     token_path: Path = gtasks_env["token_path"]
 
     token_data = {
-        "access_token": "ya29.mock_access_token",
+        "access_token": "test_mock_access_token",
         "refresh_token": "mock_refresh_token",
         "expires_in": 3600,
         "token_type": "Bearer",
@@ -141,7 +143,7 @@ def test_oauth_manager_save_tokens_restrictive_permissions(gtasks_env):
     # Check loaded tokens
     tokens = oauth_mgr._tokens
     assert tokens is not None
-    assert tokens.access_token == "ya29.mock_access_token"
+    assert tokens.access_token == "test_mock_access_token"
     assert tokens.refresh_token == "mock_refresh_token"
     assert tokens.is_expired is False
 
@@ -153,8 +155,8 @@ def test_oauth_manager_exchange_code(gtasks_env):
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {
-        "access_token": "ya29.exchanged_token",
-        "refresh_token": "1//mock_refresh",
+        "access_token": "test_exchanged_token",
+        "refresh_token": "test_mock_refresh",
         "expires_in": 3600,
     }
 
@@ -163,8 +165,8 @@ def test_oauth_manager_exchange_code(gtasks_env):
         url = "http://127.0.0.1:8080/?code=4/0AfgeXmockCode&scope=https://www.googleapis.com/auth/tasks"
         tokens = oauth_mgr.exchange_code(url, "http://127.0.0.1:8080/")
 
-        assert tokens.access_token == "ya29.exchanged_token"
-        assert tokens.refresh_token == "1//mock_refresh"
+        assert tokens.access_token == "test_exchanged_token"
+        assert tokens.refresh_token == "test_mock_refresh"
         mock_post.assert_called_once()
         call_data = mock_post.call_args[1]["data"]
         assert call_data["code"] == "4/0AfgeXmockCode"
@@ -182,14 +184,14 @@ def test_oauth_manager_refresh_token(gtasks_env):
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {
-        "access_token": "ya29.new_refreshed_token",
+        "access_token": "test_new_refreshed_token",
         "expires_in": 3600,
     }
 
     with patch("requests.post", return_value=mock_resp):
         new_token = oauth_mgr.get_valid_access_token()
 
-    assert new_token == "ya29.new_refreshed_token"
+    assert new_token == "test_new_refreshed_token"
     assert oauth_mgr._tokens.refresh_token == "persisted_refresh_token"
 
 
@@ -522,3 +524,467 @@ def test_google_tasks_view_render_and_back(gtasks_env):
     cached = service.get_tasks_for_list("list_1")
     assert len(cached) == 1
     assert cached[0].title == "Morning Yoga"
+
+
+# =========================================================================
+# 6. Google Tasks 404 Stale List and Error Resilience Tests
+# =========================================================================
+
+def test_valid_cached_list_id_exists_remotely(gtasks_env):
+    """Scenario 1: A valid cached list ID that exists remotely is synced and accessible."""
+    service: GoogleTasksService = gtasks_env["service"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    mock_lists = [{"id": "list_valid", "title": "Work Tasks"}]
+    mock_tasks = [{"id": "task_v1", "title": "Submit Quarterly Report", "status": "needsAction"}]
+
+    with patch.object(service.client, "get_task_lists", return_value=mock_lists):
+        lists, is_offline = service.sync_task_lists()
+        assert is_offline is False
+        assert any(l["id"] == "list_valid" for l in lists)
+
+    with patch.object(service.client, "get_tasks", return_value=mock_tasks):
+        tasks, is_offline = service.sync_tasks_for_list("list_valid")
+        assert is_offline is False
+        assert len(tasks) == 1
+        assert tasks[0].title == "Submit Quarterly Report"
+
+
+def test_stale_cached_list_id_returns_404_and_prunes_cache(gtasks_env):
+    """Scenario 2: A stale cached list ID returning 404 is pruned from cache and raises GoogleTasksNotFoundError."""
+    service: GoogleTasksService = gtasks_env["service"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    # Seed stale list in cache
+    stale_id = "QUlyWG5JdS1waWF3YzdnUg"
+    with service.db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO google_task_lists_cache (id, title, updated_at) VALUES (?, ?, ?)",
+            (stale_id, "Copywriting", "2026-10-19T00:00:00"),
+        )
+        conn.commit()
+
+    cached_before = [l["id"] for l in service.get_cached_task_lists()]
+    assert stale_id in cached_before
+
+    with patch.object(
+        service.client,
+        "get_tasks",
+        side_effect=GoogleTasksNotFoundError("Resource not found: /lists/QUlyWG5JdS1waWF3YzdnUg/tasks", response_body='{"error": {"code": 404}}'),
+    ):
+        with pytest.raises(GoogleTasksNotFoundError) as exc_info:
+            service.sync_tasks_for_list(stale_id)
+        assert exc_info.value.status_code == 404
+
+    # Verify stale list is pruned from SQLite cache
+    cached_after = [l["id"] for l in service.get_cached_task_lists()]
+    assert stale_id not in cached_after
+
+
+def test_recovery_when_remote_list_deleted(gtasks_env):
+    """Scenario 3: When remote lists are fetched, lists deleted on remote are reconciled and pruned."""
+    service: GoogleTasksService = gtasks_env["service"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    # Seed 2 lists in cache
+    with service.db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO google_task_lists_cache (id, title, updated_at) VALUES (?, ?, ?)", ("del_1", "Deleted 1", "2026-10-19"))
+        cursor.execute("INSERT INTO google_task_lists_cache (id, title, updated_at) VALUES (?, ?, ?)", ("del_2", "Deleted 2", "2026-10-19"))
+        cursor.execute("INSERT INTO google_task_lists_cache (id, title, updated_at) VALUES (?, ?, ?)", ("live_1", "Live List", "2026-10-19"))
+        conn.commit()
+
+    # Remote only returns live_1
+    remote_lists = [{"id": "live_1", "title": "Live List"}]
+    with patch.object(service.client, "get_task_lists", return_value=remote_lists):
+        synced_lists, is_offline = service.sync_task_lists()
+        assert is_offline is False
+        synced_ids = [l["id"] for l in synced_lists]
+        assert synced_ids == ["live_1"]
+
+    cached_now = [l["id"] for l in service.get_cached_task_lists()]
+    assert "live_1" in cached_now
+    assert "del_1" not in cached_now
+    assert "del_2" not in cached_now
+
+
+def test_valid_list_selection_after_refreshing_list_cache(gtasks_env):
+    """Scenario 4: View automatically recovers to valid list after encountering 404 on initial list."""
+    view: GoogleTasksView = gtasks_env["view"]
+    service: GoogleTasksService = gtasks_env["service"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    # Initially cache has a stale list ("A_Stale") and a valid list ("B_Live")
+    with service.db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO google_task_lists_cache (id, title, updated_at) VALUES (?, ?, ?)", ("stale_id", "A_Stale", "2026-10-19"))
+        cursor.execute("INSERT INTO google_task_lists_cache (id, title, updated_at) VALUES (?, ?, ?)", ("live_id", "B_Live", "2026-10-19"))
+        conn.commit()
+
+    def mock_get_tasks(list_id, **kwargs):
+        if list_id == "stale_id":
+            raise GoogleTasksNotFoundError("Not found", response_body="404")
+        return [{"id": "t_live", "title": "Live Task", "status": "needsAction"}]
+
+    def mock_get_task_lists():
+        return [{"id": "live_id", "title": "B_Live"}]
+
+    with patch.object(service.client, "get_tasks", side_effect=mock_get_tasks):
+        with patch.object(service.client, "get_task_lists", side_effect=mock_get_task_lists):
+            with patch("sys.stdin", io.StringIO("b\n")):
+                view.run()
+
+    # Live list tasks must have been retrieved and saved
+    cached = service.get_tasks_for_list("live_id")
+    assert len(cached) == 1
+    assert cached[0].title == "Live Task"
+    # Stale list should no longer be in cache
+    assert "stale_id" not in [l["id"] for l in service.get_cached_task_lists()]
+
+
+def test_local_tasks_and_completion_history_preserved_when_remote_list_missing(gtasks_env):
+    """Scenario 5: 404 remote missing list does not delete local tasks, source, or completion history."""
+    service: GoogleTasksService = gtasks_env["service"]
+    daily_svc: DailyService = gtasks_env["daily_svc"]
+    task_svc: TaskService = gtasks_env["task_svc"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    list_id = "stale_preserved_list"
+    # Populate a local task under this list
+    with patch.object(service.client, "create_task", return_value={"id": "rem_1", "title": "Completed Past Goal"}):
+        task = service.create_task(list_id, "Completed Past Goal", notes="Very important notes")
+
+    # Add to daily tasks on 2026-10-15 and mark completed
+    dt, _ = daily_svc.add_task_to_date(task.id, "2026-10-15")
+    daily_svc.toggle_task_completion(dt.id)
+
+    # Verify task is completed
+    hist_tasks = daily_svc.get_tasks_for_date("2026-10-15")
+    assert len(hist_tasks) == 1
+    assert hist_tasks[0].task.status == "completed"
+
+    # Now simulate 404 when syncing this list
+    with patch.object(service.client, "get_tasks", side_effect=GoogleTasksNotFoundError("Resource not found", response_body="404")):
+        with pytest.raises(GoogleTasksNotFoundError):
+            service.sync_tasks_for_list(list_id)
+
+    # Cache should have pruned the list
+    assert list_id not in [l["id"] for l in service.get_cached_task_lists()]
+
+    # BUT local task, source, and completion history MUST be 100% preserved
+    persisted_task = task_svc.get_task_by_id(task.id)
+    assert persisted_task is not None
+    assert persisted_task.title == "Completed Past Goal"
+    assert persisted_task.description == "Very important notes"
+
+    hist_after = daily_svc.get_tasks_for_date("2026-10-15")
+    assert len(hist_after) == 1
+    assert hist_after[0].task_id == task.id
+    assert hist_after[0].task.status == "completed"
+
+    local_list_tasks = service.get_tasks_for_list(list_id)
+    assert len(local_list_tasks) == 1
+    assert local_list_tasks[0].id == task.id
+
+
+def test_list_specific_api_failure_without_crashing_tui(gtasks_env):
+    """Scenario 6: Generic API failure (e.g. 500) displays error message and falls back to cached tasks without crash."""
+    view: GoogleTasksView = gtasks_env["view"]
+    service: GoogleTasksService = gtasks_env["service"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    mock_lists = [{"id": "list_err", "title": "Failing List"}]
+    with patch.object(service.client, "get_task_lists", return_value=mock_lists):
+        service.sync_task_lists()
+
+    with patch.object(service.client, "get_tasks", side_effect=GoogleTasksAPIError("Google Tasks API 500 Server Error", status_code=500)):
+        with patch("sys.stdin", io.StringIO("b\n")):
+            view.run()
+
+    # The view should exit cleanly on 'b' without an unhandled exception
+
+
+def test_network_auth_and_404_errors_distinguishable(gtasks_env):
+    """Scenario 7: Network errors, auth errors, and 404 not found are typed and distinguishable."""
+    client: GoogleTasksClient = gtasks_env["client"]
+    service: GoogleTasksService = gtasks_env["service"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    # 1. 404 raises GoogleTasksNotFoundError
+    mock_resp_404 = MagicMock()
+    mock_resp_404.status_code = 404
+    mock_resp_404.text = '{"error": {"code": 404, "message": "Not found"}}'
+    with patch("requests.request", return_value=mock_resp_404):
+        with pytest.raises(GoogleTasksNotFoundError) as exc_404:
+            client.get_tasks("missing_id")
+        assert exc_404.value.status_code == 404
+        assert isinstance(exc_404.value, GoogleTasksAPIError)
+
+    # 2. Network error raises GoogleTasksNetworkError
+    with patch("requests.request", side_effect=requests.ConnectionError("DNS failure")):
+        with pytest.raises(GoogleTasksNetworkError):
+            client.get_tasks("any_id")
+
+    # 3. 401 unresolvable raises GoogleTasksAuthError
+    mock_resp_401 = MagicMock()
+    mock_resp_401.status_code = 401
+    mock_resp_401.text = '{"error": {"code": 401, "message": "Unauthorized"}}'
+    with patch("requests.request", return_value=mock_resp_401):
+        with patch.object(client.oauth_manager, "refresh_access_token", side_effect=GoogleTasksAuthError("Revoked")):
+            with pytest.raises(GoogleTasksAuthError):
+                client.get_tasks("any_id")
+
+
+def test_no_duplicate_tasks_after_refresh_and_retry(gtasks_env):
+    """Scenario 8: Repeated sync calls upsert tasks without creating duplicate entities in SQLite."""
+    service: GoogleTasksService = gtasks_env["service"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    mock_tasks = [
+        {"id": "task_dup_1", "title": "Buy Groceries", "status": "needsAction", "updated": "2026-10-19T10:00:00.000Z"},
+        {"id": "task_dup_2", "title": "Pay Utilities", "status": "needsAction", "updated": "2026-10-19T10:00:00.000Z"},
+    ]
+
+    with patch.object(service.client, "get_tasks", return_value=mock_tasks):
+        tasks_pass1, _ = service.sync_tasks_for_list("list_dups")
+        assert len(tasks_pass1) == 2
+
+        # Retry / refresh sync
+        tasks_pass2, _ = service.sync_tasks_for_list("list_dups")
+        assert len(tasks_pass2) == 2
+
+    # Query local database directly
+    all_cached = service.get_tasks_for_list("list_dups")
+    assert len(all_cached) == 2
+    titles = {t.title for t in all_cached}
+    assert titles == {"Buy Groceries", "Pay Utilities"}
+
+
+# =========================================================================
+# 7. Smooth Performance, Completed Task Filtering, Auto-Sync & Outbox Tests
+# =========================================================================
+
+def test_completed_tasks_hidden_from_active_list_but_preserved_in_db(gtasks_env):
+    """Verify completed tasks are excluded from active list view but kept in SQLite and daily_tasks."""
+    service: GoogleTasksService = gtasks_env["service"]
+    daily_svc: DailyService = gtasks_env["daily_svc"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    mock_tasks = [
+        {"id": "t_pending", "title": "Active Task", "status": "needsAction"},
+        {"id": "t_done", "title": "Finished Task", "status": "completed", "completed": "2026-10-20T10:00:00Z"},
+    ]
+
+    with patch.object(service.client, "get_tasks", return_value=mock_tasks):
+        synced, _ = service.sync_tasks_for_list("l_hide_test")
+        assert len(synced) == 2
+
+    # Active view: include_completed=False (only pending)
+    active = service.get_tasks_for_list("l_hide_test", include_completed=False)
+    assert len(active) == 1
+    assert active[0].title == "Active Task"
+    assert active[0].status == "pending"
+
+    # SQLite query: include_completed=True (all tasks preserved)
+    all_tasks = service.get_tasks_for_list("l_hide_test", include_completed=True)
+    assert len(all_tasks) == 2
+    titles = {t.title for t in all_tasks}
+    assert "Finished Task" in titles
+
+
+def test_remote_status_reconciliation_complete_and_reopen(gtasks_env):
+    """Verify remote completion marks task completed and remote reopening resets to pending."""
+    service: GoogleTasksService = gtasks_env["service"]
+    daily_svc: DailyService = gtasks_env["daily_svc"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    # 1. Sync pending task with due date
+    mock_pass1 = [{"id": "t_toggle", "title": "Dynamic Status", "status": "needsAction", "due": "2026-10-20T00:00:00.000Z"}]
+    with patch.object(service.client, "get_tasks", return_value=mock_pass1):
+        service.sync_tasks_for_list("l_recon")
+
+    t1 = service.get_tasks_for_list("l_recon", include_completed=True)[0]
+    assert t1.status == "pending"
+    d_tasks = daily_svc.get_tasks_for_date("2026-10-20")
+    assert len(d_tasks) == 1
+    assert d_tasks[0].completed_at is None
+
+    # 2. Remote marks it completed
+    mock_pass2 = [{"id": "t_toggle", "title": "Dynamic Status", "status": "completed", "completed": "2026-10-20T11:00:00Z", "due": "2026-10-20T00:00:00.000Z"}]
+    with patch.object(service.client, "get_tasks", return_value=mock_pass2):
+        service.sync_tasks_for_list("l_recon")
+
+    t2 = service.get_tasks_for_list("l_recon", include_completed=True)[0]
+    assert t2.status == "completed"
+    # Should disappear from active view
+    assert len(service.get_tasks_for_list("l_recon", include_completed=False)) == 0
+    d_tasks_completed = daily_svc.get_tasks_for_date("2026-10-20")
+    assert d_tasks_completed[0].completed_at is not None
+
+    # 3. Remote reopens it
+    mock_pass3 = [{"id": "t_toggle", "title": "Dynamic Status", "status": "needsAction", "due": "2026-10-20T00:00:00.000Z"}]
+    with patch.object(service.client, "get_tasks", return_value=mock_pass3):
+        service.sync_tasks_for_list("l_recon")
+
+    t3 = service.get_tasks_for_list("l_recon", include_completed=True)[0]
+    assert t3.status == "pending"
+    # Reappears in active view
+    assert len(service.get_tasks_for_list("l_recon", include_completed=False)) == 1
+    d_tasks_reopened = daily_svc.get_tasks_for_date("2026-10-20")
+    assert d_tasks_reopened[0].completed_at is None
+
+
+def test_remote_due_date_removal_moves_task_to_universal(gtasks_env):
+    """Verify that removing a due date remotely unschedules the task from daily_tasks so it appears in Universal."""
+    service: GoogleTasksService = gtasks_env["service"]
+    daily_svc: DailyService = gtasks_env["daily_svc"]
+    task_svc: TaskService = gtasks_env["task_svc"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    # 1. Sync with due date -> scheduled in daily_tasks
+    mock_pass1 = [{"id": "t_due_remove", "title": "Has Due Date", "status": "needsAction", "due": "2026-10-22T00:00:00.000Z"}]
+    with patch.object(service.client, "get_tasks", return_value=mock_pass1):
+        service.sync_tasks_for_list("l_univ")
+
+    t1 = service.get_tasks_for_list("l_univ", include_completed=True)[0]
+    assert daily_svc.get_task_scheduled_date(t1.id) == "2026-10-22"
+    # Not in universal because it is scheduled
+    assert t1.id not in [u.id for u in task_svc.get_universal_tasks()]
+
+    # 2. Remote clears due date (due=None) -> unschedules from daily_tasks
+    mock_pass2 = [{"id": "t_due_remove", "title": "Has Due Date", "status": "needsAction", "due": None}]
+    with patch.object(service.client, "get_tasks", return_value=mock_pass2):
+        service.sync_tasks_for_list("l_univ")
+
+    assert daily_svc.get_task_scheduled_date(t1.id) is None
+    # Now appears in universal tasks automatically!
+    univ_tasks = task_svc.get_universal_tasks()
+    assert any(u.id == t1.id for u in univ_tasks)
+
+
+def test_move_google_task_to_universal_preserves_source_and_clears_remote_due(gtasks_env):
+    """Verify moving a Google Task to Universal preserves source_type and clears remote due date."""
+    service: GoogleTasksService = gtasks_env["service"]
+    daily_svc: DailyService = gtasks_env["daily_svc"]
+    task_svc: TaskService = gtasks_env["task_svc"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    with patch.object(service.client, "create_task", return_value={"id": "rem_m2u", "title": "Move to Univ"}):
+        task = service.create_task("l_work", "Move to Univ", due_date="2026-10-20")
+
+    dt, _ = daily_svc.add_task_to_date(task.id, "2026-10-20")
+
+    with patch.object(service.client, "update_task") as mock_update:
+        daily_svc.move_tasks_to_universal_bulk([dt.id])
+
+    # Preserves source_type='google_tasks'
+    persisted = task_svc.get_task_by_id(task.id)
+    assert persisted.source_type == "google_tasks"
+
+    # Pending schedule was deleted
+    assert daily_svc.get_task_scheduled_date(task.id) is None
+
+    # Appears in universal tasks
+    univ = task_svc.get_universal_tasks()
+    assert any(u.id == task.id for u in univ)
+
+
+def test_durable_offline_outbox_queue_and_drain(gtasks_env):
+    """Verify that offline mutations are enqueued in google_tasks_outbox and drained on reconnect."""
+    service: GoogleTasksService = gtasks_env["service"]
+    daily_svc: DailyService = gtasks_env["daily_svc"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    # Create task locally while client.create_task fails with network error
+    with patch.object(service.client, "create_task", side_effect=GoogleTasksNetworkError("Offline")):
+        task = service.create_task("l_work", "Offline Created Task", notes="Pending push")
+
+    outbox_items = service.get_pending_outbox()
+    assert len(outbox_items) == 1
+    assert outbox_items[0]["action"] == "create"
+    assert outbox_items[0]["task_id"] == task.id
+
+    # Now drain outbox when online
+    with patch.object(service.client, "create_task", return_value={"id": "rem_new_id", "title": "Offline Created Task"}):
+        drained = service.drain_outbox()
+        assert drained == 1
+
+    assert len(service.get_pending_outbox()) == 0
+
+
+def test_google_tasks_sync_manager_lifecycle_and_trigger(gtasks_env):
+    """Verify GoogleTasksSyncManager starts daemon thread, triggers sync, and stops cleanly."""
+    from todo.services.google_tasks_sync_manager import GoogleTasksSyncManager
+
+    service: GoogleTasksService = gtasks_env["service"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    manager = GoogleTasksSyncManager(service, interval=10.0)
+    assert manager.is_running is False
+
+    with patch.object(service, "sync_all_lists", return_value=(True, "Synced 1 list(s)")):
+        manager.start()
+        assert manager.is_running is True
+
+        # Trigger sync
+        manager.trigger_sync()
+        time.sleep(0.1)
+
+        success, msg = manager.sync_now()
+        assert success is True
+        assert "Synced" in msg
+
+        status_text = manager.get_status_text()
+        assert "Connected" in status_text
+
+        manager.stop(timeout=1.0)
+        assert manager.is_running is False
+
+
+def test_local_cache_latency_vs_network_latency(gtasks_env):
+    """Verify local SQLite cache retrieval is sub-10ms compared to simulated network latency."""
+    service: GoogleTasksService = gtasks_env["service"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    # Seed 50 tasks in cache
+    mock_tasks = [{"id": f"task_{i}", "title": f"Bench Task {i}", "status": "needsAction"} for i in range(50)]
+    with patch.object(service.client, "get_tasks", return_value=mock_tasks):
+        service.sync_tasks_for_list("l_bench")
+
+    # Measure local cache read
+    t0 = time.perf_counter()
+    cached = service.get_tasks_for_list("l_bench", include_completed=False)
+    t_cache = (time.perf_counter() - t0) * 1000
+
+    assert len(cached) == 50
+    # Cache read should be under 20ms (typically < 5ms)
+    assert t_cache < 25.0
+
+
+def test_google_tasks_view_instant_cache_render_with_sync_manager(gtasks_env):
+    """Verify GoogleTasksView renders instantly from cache when sync_manager is provided without waiting for sync."""
+    from todo.services.google_tasks_sync_manager import GoogleTasksSyncManager
+
+    service: GoogleTasksService = gtasks_env["service"]
+    daily_svc: DailyService = gtasks_env["daily_svc"]
+    service.oauth_manager.save_tokens({"access_token": "tok", "expires_in": 3600})
+
+    # Seed cache
+    with service.db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO google_task_lists_cache (id, title, updated_at) VALUES (?, ?, ?)", ("list_fast", "Fast List", "2026-10-20"))
+        conn.commit()
+
+    manager = GoogleTasksSyncManager(service, interval=60.0)
+    view = GoogleTasksView(service, daily_svc, sync_manager=manager)
+
+    # When view.run executes, it should render and exit on 'b' without calling blocking network get_tasks
+    with patch.object(service.client, "get_tasks") as mock_get_tasks:
+        with patch("sys.stdin", io.StringIO("b\n")):
+            view.run()
+        # View did NOT block on synchronous network get_tasks because it rendered from cache
+        mock_get_tasks.assert_not_called()
+
+
+

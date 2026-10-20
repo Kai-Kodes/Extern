@@ -112,6 +112,14 @@ CREATE TABLE IF NOT EXISTS google_task_lists_cache (
     cached_at TEXT,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS google_tasks_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER,
+    action TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
 """
 
 INDEXES_SQL = """
@@ -129,6 +137,7 @@ CREATE INDEX IF NOT EXISTS idx_daily_tasks_date ON daily_tasks(date);
 CREATE INDEX IF NOT EXISTS idx_daily_tasks_completed_at ON daily_tasks(completed_at);
 CREATE INDEX IF NOT EXISTS idx_telegram_cache_title ON telegram_channels_cache(title);
 CREATE INDEX IF NOT EXISTS idx_google_task_lists_cache_title ON google_task_lists_cache(title);
+CREATE INDEX IF NOT EXISTS idx_google_tasks_outbox_created ON google_tasks_outbox(created_at);
 CREATE INDEX IF NOT EXISTS idx_pomodoro_presets_name ON pomodoro_presets(name);
 """
 
@@ -145,10 +154,11 @@ class Database:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def get_connection(self) -> sqlite3.Connection:
-        """Create and return an SQLite connection configured with Row factory."""
-        conn = sqlite3.connect(str(self.db_path))
+        """Create and return an SQLite connection configured with Row factory and busy timeout."""
+        conn = sqlite3.connect(str(self.db_path), timeout=15.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA busy_timeout = 15000;")
         return conn
 
     def init_db(self) -> None:
@@ -206,6 +216,19 @@ class Database:
                 cursor.execute("ALTER TABLE google_task_lists_cache ADD COLUMN etag TEXT")
             if "cached_at" not in gtc_columns:
                 cursor.execute("ALTER TABLE google_task_lists_cache ADD COLUMN cached_at TEXT")
+
+            # Ensure google_tasks_outbox table exists
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS google_tasks_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER,
+                    action TEXT NOT NULL,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
 
             # 3. Create all indexes safely now that tables and columns are guaranteed to exist
             conn.executescript(INDEXES_SQL)
