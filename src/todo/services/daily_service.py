@@ -416,9 +416,11 @@ class DailyService:
         action = "complete" if is_completed else "reopen"
         payload = {"list_id": list_id, "task_id": remote_id}
 
-        pushed = False
         g_svc = getattr(self, "google_tasks_service", None)
-        if g_svc and g_svc.is_authenticated() and not remote_id.startswith("local_"):
+        sync_mgr = getattr(self, "google_tasks_sync_manager", None) or getattr(g_svc, "sync_manager", None)
+
+        pushed = False
+        if sync_mgr is None and g_svc and g_svc.is_authenticated() and not remote_id.startswith("local_"):
             try:
                 g_svc.client.set_task_completed(list_id=list_id, task_id=remote_id, completed=is_completed)
                 pushed = True
@@ -436,6 +438,10 @@ class DailyService:
                     (task_id, action, json.dumps(payload, ensure_ascii=False), now_iso),
                 )
                 conn.commit()
+
+        if sync_mgr:
+            sync_mgr.notify_change()
+            sync_mgr.trigger_sync()
 
     def _set_google_task_due_date(self, task_id: int, source_id: Optional[int], date_str: str) -> None:
         """Update due date for a Google Task when scheduled into daily_tasks."""
@@ -459,9 +465,11 @@ class DailyService:
             )
             conn.commit()
 
-        pushed = False
         g_svc = getattr(self, "google_tasks_service", None)
-        if g_svc and g_svc.is_authenticated() and not remote_id.startswith("local_"):
+        sync_mgr = getattr(self, "google_tasks_sync_manager", None) or getattr(g_svc, "sync_manager", None)
+
+        pushed = False
+        if sync_mgr is None and g_svc and g_svc.is_authenticated() and not remote_id.startswith("local_"):
             try:
                 g_svc.client.update_task(list_id=list_id, task_id=remote_id, due_date=date_str)
                 pushed = True
@@ -485,6 +493,10 @@ class DailyService:
                 )
                 conn.commit()
 
+        if sync_mgr:
+            sync_mgr.notify_change()
+            sync_mgr.trigger_sync()
+
     def _clear_google_task_due_date(self, task_id: int, source_id: Optional[int]) -> None:
         """Clear due date for a Google Task when moved to universal."""
         if not source_id:
@@ -506,9 +518,11 @@ class DailyService:
             )
             conn.commit()
 
-        pushed = False
         g_svc = getattr(self, "google_tasks_service", None)
-        if g_svc and g_svc.is_authenticated() and not remote_id.startswith("local_"):
+        sync_mgr = getattr(self, "google_tasks_sync_manager", None) or getattr(g_svc, "sync_manager", None)
+
+        pushed = False
+        if sync_mgr is None and g_svc and g_svc.is_authenticated() and not remote_id.startswith("local_"):
             try:
                 g_svc.client.update_task(list_id=list_id, task_id=remote_id, clear_due=True)
                 pushed = True
@@ -531,6 +545,10 @@ class DailyService:
                     (task_id, "update", json.dumps(payload, ensure_ascii=False), now_iso),
                 )
                 conn.commit()
+
+        if sync_mgr:
+            sync_mgr.notify_change()
+            sync_mgr.trigger_sync()
 
     def move_task_to_universal(self, daily_task_id: int) -> bool:
         """Move a single daily task to Universal Tasks."""

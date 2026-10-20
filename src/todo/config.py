@@ -25,6 +25,10 @@ class Config:
     google_client_secret: Optional[str] = None
     google_credentials_file: Optional[Path] = None
     google_token_path: Optional[Path] = None
+    google_sync_interval: float = 3.0
+    google_sync_idle_interval: float = 15.0
+    google_sync_error_interval: float = 30.0
+    google_sync_timeout: float = 7.0
 
     @classmethod
     def load(cls) -> "Config":
@@ -116,6 +120,11 @@ class Config:
             else None
         )
 
+        google_sync_interval = float(os.environ.get("TODO_GOOGLE_SYNC_INTERVAL", "3.0"))
+        google_sync_idle_interval = float(os.environ.get("TODO_GOOGLE_SYNC_IDLE_INTERVAL", "15.0"))
+        google_sync_error_interval = float(os.environ.get("TODO_GOOGLE_SYNC_ERROR_INTERVAL", "30.0"))
+        google_sync_timeout = float(os.environ.get("TODO_GOOGLE_SYNC_TIMEOUT", "7.0"))
+
         if config_file.exists():
             try:
                 with open(config_file, "rb") as f:
@@ -168,6 +177,14 @@ class Config:
                         google_credentials_file = Path(gt_sec["credentials_file"]).expanduser().resolve()
                     if not google_token_path and "token_path" in gt_sec:
                         google_token_path = Path(gt_sec["token_path"]).expanduser().resolve()
+                    if "sync_interval" in gt_sec:
+                        google_sync_interval = float(gt_sec["sync_interval"])
+                    if "sync_idle_interval" in gt_sec:
+                        google_sync_idle_interval = float(gt_sec["sync_idle_interval"])
+                    if "sync_error_interval" in gt_sec:
+                        google_sync_error_interval = float(gt_sec["sync_error_interval"])
+                    if "sync_timeout" in gt_sec:
+                        google_sync_timeout = float(gt_sec["sync_timeout"])
             except Exception:
                 # If config parsing fails, fallback gracefully to defaults
                 pass
@@ -218,6 +235,10 @@ class Config:
             google_client_secret=google_client_secret,
             google_credentials_file=google_credentials_file,
             google_token_path=google_token_path,
+            google_sync_interval=google_sync_interval,
+            google_sync_idle_interval=google_sync_idle_interval,
+            google_sync_error_interval=google_sync_error_interval,
+            google_sync_timeout=google_sync_timeout,
         )
 
     @classmethod

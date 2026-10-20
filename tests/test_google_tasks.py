@@ -480,17 +480,27 @@ def test_service_delete_task_removes_from_google_and_local(gtasks_env):
 # 5. UI Integration (Add Task Option 6, Today 'g' and 'e' shortcuts)
 # =========================================================================
 
-def test_add_task_menu_has_google_tasks_option(gtasks_env):
-    """Verify Add Task menu includes Option 6 for Google Tasks."""
+def test_add_task_menu_excludes_google_tasks_option(gtasks_env):
+    """Verify Add Task menu contains only 5 options and does not include Google Tasks."""
     cfg: Config = gtasks_env["cfg"]
     app = TodoApp(cfg)
 
-    # Inputs: "6" (select Google Tasks), "b" (back from setup screen)
-    inputs = ["6\n", "b\n", "q\n"]
+    # 1. Verify AddTaskView has exactly 5 options
+    from todo.ui.add_task_view import AddTaskView
+    at_view = AddTaskView()
+    # Capture rendered output
+    with patch("todo.ui.add_task_view.console.print") as mock_print:
+        at_view.render(clear=False)
+        table = next(arg[0][0] for arg in mock_print.call_args_list if hasattr(arg[0][0], "rows"))
+        assert len(table.rows) == 5
+
+    # 2. Entering "6" in handle_add_task_menu is rejected as invalid, "b" exits
+    inputs = ["6\n", "b\n"]
     with patch.object(app.google_tasks_view, "run") as mock_gtasks_run:
         with patch("sys.stdin", io.StringIO("".join(inputs))):
             app.handle_add_task_menu()
-        mock_gtasks_run.assert_called_once()
+        # Google Tasks view was NOT opened from Add Task menu
+        mock_gtasks_run.assert_not_called()
 
 
 def test_today_view_g_shortcut_opens_google_tasks(gtasks_env):

@@ -2,8 +2,8 @@
 
 import json
 import time
-from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from todo.config import Config
 from todo.database import Database
@@ -23,6 +23,40 @@ from todo.services.source_service import SourceService
 from todo.services.task_service import TaskService
 
 
+class SyncResult(tuple):
+    """Tuple (tasks, is_offline) with an added has_changes boolean attribute."""
+
+    def __new__(cls, tasks: List[Task], is_offline: bool, has_changes: bool = False):
+        instance = super().__new__(cls, (tasks, is_offline))
+        instance.has_changes = has_changes
+        return instance
+
+    @property
+    def tasks(self) -> List[Task]:
+        return self[0]
+
+    @property
+    def is_offline(self) -> bool:
+        return self[1]
+
+
+class SyncSummary(tuple):
+    """Tuple (success, message) with an added has_changes boolean attribute."""
+
+    def __new__(cls, success: bool, message: str, has_changes: bool = False):
+        instance = super().__new__(cls, (success, message))
+        instance.has_changes = has_changes
+        return instance
+
+    @property
+    def success(self) -> bool:
+        return self[0]
+
+    @property
+    def message(self) -> str:
+        return self[1]
+
+
 class GoogleTasksService:
     """Coordinates Google Tasks cloud sync, SQLite caching, task entities, and scheduling."""
 
@@ -37,6 +71,8 @@ class GoogleTasksService:
         self.db = db
         self.config = config
         self.date_provider = date_provider
+        self.sync_manager: Optional[Any] = None
+        self._list_last_synced: Dict[str, str] = {}
 
         if oauth_manager:
             self.oauth_manager = oauth_manager
@@ -48,7 +84,10 @@ class GoogleTasksService:
                 credentials_file=config.google_credentials_file,
             )
 
-        self.client = client or GoogleTasksClient(self.oauth_manager)
+        self.client = client or GoogleTasksClient(
+            self.oauth_manager,
+            timeout=(3.0, getattr(config, "google_sync_timeout", 7.0)),
+        )
         self.task_service = TaskService(db, date_provider=date_provider)
         self.source_service = SourceService(db, date_provider=date_provider)
         self.daily_service = DailyService(db, date_provider=date_provider)
@@ -141,6 +180,23 @@ class GoogleTasksService:
         for item in items:
             action = item["action"]
             payload = json.loads(item["payload"] or "{}")
+
+            # If payload task_id starts with local_, resolve to remote_id if task was already assigned one
+            if payload.get("task_id", "").startswith("local_") and item.get("task_id"):
+                with self.db.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """
+                        SELECT fi.path FROM file_items fi
+                        JOIN tasks t ON t.source_id = fi.id
+                        WHERE t.id = ?
+                        """,
+                        (item["task_id"],),
+                    )
+                    fi_row = cursor.fetchone()
+                    if fi_row and not fi_row["path"].startswith("local_"):
+                        payload["task_id"] = fi_row["path"]
+
             try:
                 if action == "complete":
                     self.client.set_task_completed(
@@ -190,6 +246,19 @@ class GoogleTasksService:
                                     "UPDATE file_items SET path = ?, metadata = ?, updated_at = ? WHERE id = ?",
                                     (remote_id, json.dumps(meta, ensure_ascii=False), now_iso, fi_id),
                                 )
+                                # Propagate remote_id to any subsequent queued outbox items for this task
+                                cursor.execute(
+                                    "SELECT id, payload FROM google_tasks_outbox WHERE task_id = ? AND id > ?",
+                                    (local_task_id, item["id"]),
+                                )
+                                for f_row in cursor.fetchall():
+                                    f_payload = json.loads(f_row["payload"] or "{}")
+                                    if f_payload.get("task_id", "").startswith("local_"):
+                                        f_payload["task_id"] = remote_id
+                                        cursor.execute(
+                                            "UPDATE google_tasks_outbox SET payload = ? WHERE id = ?",
+                                            (json.dumps(f_payload, ensure_ascii=False), f_row["id"]),
+                                        )
                                 conn.commit()
                 elif action == "delete":
                     self.client.delete_task(
@@ -211,20 +280,24 @@ class GoogleTasksService:
 
         return processed
 
-    def sync_all_lists(self) -> Tuple[bool, str]:
+    def sync_all_lists(self, incremental: bool = True) -> SyncSummary:
         """
-        Perform a full synchronization cycle across all Google Tasks lists:
+        Perform a full or incremental synchronization cycle across all Google Tasks lists:
         1. Drain pending outbox changes to Google Tasks.
         2. Sync all task lists.
         3. Sync tasks for each task list (auto-scheduling & completion reconciliation).
-        Returns: (success, status_description)
+        Returns: SyncSummary(success, status_description, has_changes=...)
         """
         if not self.is_authenticated():
-            return False, "Not authenticated"
+            return SyncSummary(False, "Not authenticated", has_changes=False)
+
+        has_any_changes = False
 
         # 1. Drain outbox
         try:
-            self.drain_outbox()
+            drained = self.drain_outbox()
+            if drained > 0:
+                has_any_changes = True
         except Exception:
             pass
 
@@ -232,25 +305,30 @@ class GoogleTasksService:
         try:
             lists, is_offline = self.sync_task_lists()
             if is_offline:
-                return False, "Offline"
+                return SyncSummary(False, "Offline", has_changes=has_any_changes)
         except Exception as e:
-            return False, f"Failed syncing lists: {e}"
+            return SyncSummary(False, f"Failed syncing lists: {e}", has_changes=has_any_changes)
 
         # 3. Sync each list
         synced_count = 0
+        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         for l in lists:
             list_id = l.get("id")
             if not list_id:
                 continue
+            updated_min = self._list_last_synced.get(list_id) if incremental else None
             try:
-                self.sync_tasks_for_list(list_id)
+                res = self.sync_tasks_for_list(list_id, updated_min=updated_min)
+                self._list_last_synced[list_id] = now_utc
+                if getattr(res, "has_changes", False):
+                    has_any_changes = True
                 synced_count += 1
             except GoogleTasksNotFoundError:
                 continue
             except Exception as e:
-                return False, f"Failed syncing list '{l.get('title', list_id)}': {e}"
+                return SyncSummary(False, f"Failed syncing list '{l.get('title', list_id)}': {e}", has_changes=has_any_changes)
 
-        return True, f"Synced {synced_count} list(s)"
+        return SyncSummary(True, f"Synced {synced_count} list(s)", has_changes=has_any_changes)
 
     def sync_task_lists(self) -> Tuple[List[Dict[str, Any]], bool]:
         """
@@ -405,22 +483,31 @@ class GoogleTasksService:
             for r in rows
         ]
 
-    def sync_tasks_for_list(self, list_id: str) -> Tuple[List[Task], bool]:
+    def sync_tasks_for_list(
+        self,
+        list_id: str,
+        updated_min: Optional[str] = None,
+    ) -> SyncResult:
         """
         Sync tasks from Google Tasks API into local SQLite database.
         Maps list to Source, tasks to FileItems and Tasks, and preserves local scheduling.
-        Returns: (tasks, is_offline)
+        Returns: SyncResult(tasks, is_offline, has_changes=...)
         """
         source = self.get_source_for_list(list_id)
 
         if not self.is_authenticated():
-            return self.get_tasks_for_list(list_id), True
+            return SyncResult(self.get_tasks_for_list(list_id), True, has_changes=False)
 
         try:
-            remote_tasks = self.client.get_tasks(list_id, show_completed=True, show_hidden=True)
+            remote_tasks = self.client.get_tasks(
+                list_id,
+                show_completed=True,
+                show_hidden=True,
+                updated_min=updated_min,
+            )
         except (GoogleTasksNetworkError, GoogleTasksAuthError, requests_exception()):
             # Fallback to local cache
-            return self.get_tasks_for_list(list_id), True
+            return SyncResult(self.get_tasks_for_list(list_id), True, has_changes=False)
         except (GoogleTasksNotFoundError, GoogleTasksAPIError) as e:
             if getattr(e, "status_code", None) == 404 or isinstance(e, GoogleTasksNotFoundError):
                 self.prune_cached_task_list(list_id)
@@ -430,6 +517,10 @@ class GoogleTasksService:
                 ) from e
             raise
 
+        if updated_min and len(remote_tasks) == 0:
+            return SyncResult(self.get_tasks_for_list(list_id, include_completed=True), False, has_changes=False)
+
+        has_changes = False
         now_iso = self.get_now().isoformat()
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
@@ -463,7 +554,7 @@ class GoogleTasksService:
                 # Look up existing FileItem by path (which stores task_id)
                 cursor.execute(
                     """
-                    SELECT id, completed, completed_at FROM file_items
+                    SELECT id, title, completed, completed_at, metadata FROM file_items
                     WHERE source_id = ? AND path = ?
                     """,
                     (source.id, task_id),
@@ -472,7 +563,17 @@ class GoogleTasksService:
 
                 if existing_fi:
                     fi_id = existing_fi["id"]
+                    old_meta = json.loads(existing_fi["metadata"] or "{}")
+                    if (
+                        existing_fi["title"] != title
+                        or bool(existing_fi["completed"]) != is_remote_completed
+                        or old_meta.get("notes", "") != notes
+                        or old_meta.get("due") != due
+                        or old_meta.get("status") != status
+                    ):
+                        has_changes = True
                 else:
+                    has_changes = True
                     cursor.execute(
                         """
                         INSERT INTO file_items (source_id, path, title, type, metadata, completed, completed_at, created_at, updated_at)
@@ -485,7 +586,7 @@ class GoogleTasksService:
                 # Ensure linked Task entity exists
                 cursor.execute(
                     """
-                    SELECT id, status FROM tasks
+                    SELECT id, title, description, status FROM tasks
                     WHERE source_type = 'google_tasks' AND source_id = ?
                     """,
                     (fi_id,),
@@ -494,18 +595,25 @@ class GoogleTasksService:
 
                 # Check if there are pending outbox items for this task
                 has_pending_outbox = False
+                pending_actions = set()
                 if existing_task:
                     cursor.execute(
-                        "SELECT id FROM google_tasks_outbox WHERE task_id = ?",
+                        "SELECT id, action, payload FROM google_tasks_outbox WHERE task_id = ?",
                         (existing_task["id"],),
                     )
-                    has_pending_outbox = cursor.fetchone() is not None
+                    outbox_rows = cursor.fetchall()
+                    if outbox_rows:
+                        has_pending_outbox = True
+                        pending_actions = {r["action"] for r in outbox_rows}
 
                 if has_pending_outbox:
                     # Keep local status until outbox is drained
                     task_status = existing_task["status"]
                     final_completed = (task_status == "completed")
                     final_completed_at = existing_fi["completed_at"] if existing_fi else None
+                    if "update" in pending_actions:
+                        title = existing_task["title"]
+                        notes = existing_task["description"] or ""
                 else:
                     # Remote status is authoritative
                     task_status = "completed" if is_remote_completed else "pending"
@@ -524,6 +632,8 @@ class GoogleTasksService:
 
                 if existing_task:
                     t_id = existing_task["id"]
+                    if existing_task["title"] != title or existing_task["description"] != notes or existing_task["status"] != task_status:
+                        has_changes = True
                     cursor.execute(
                         """
                         UPDATE tasks
@@ -533,6 +643,7 @@ class GoogleTasksService:
                         (title, notes, task_status, now_iso, t_id),
                     )
                 else:
+                    has_changes = True
                     cursor.execute(
                         """
                         INSERT INTO tasks (title, description, source_type, source_id, status, created_at, updated_at)
@@ -575,11 +686,13 @@ class GoogleTasksService:
                     if sched_rows:
                         for s_row in sched_rows:
                             if s_row["completed_at"] is None and s_row["date"] != due_date_str:
+                                has_changes = True
                                 cursor.execute(
                                     "UPDATE daily_tasks SET date = ? WHERE id = ?",
                                     (due_date_str, s_row["id"]),
                                 )
                     elif task_status == "pending":
+                        has_changes = True
                         cursor.execute(
                             "SELECT COALESCE(MAX(position), 0) AS max_pos FROM daily_tasks WHERE date = ?",
                             (due_date_str,),
@@ -595,6 +708,9 @@ class GoogleTasksService:
                 else:
                     # Task does NOT have a due date: unschedule pending entries so it appears in Universal
                     if sched_rows:
+                        pending_sched = [s for s in sched_rows if s["completed_at"] is None]
+                        if pending_sched:
+                            has_changes = True
                         cursor.execute(
                             """
                             DELETE FROM daily_tasks
@@ -610,7 +726,11 @@ class GoogleTasksService:
             )
             conn.commit()
 
-        return self.get_tasks_for_list(list_id, include_completed=True), False
+        return SyncResult(
+            self.get_tasks_for_list(list_id, include_completed=True),
+            False,
+            has_changes=has_changes,
+        )
 
     def create_task(
         self,
@@ -619,6 +739,7 @@ class GoogleTasksService:
         notes: str = "",
         due_date: Optional[str] = None,
         schedule_date: Optional[str] = None,
+        sync_remote: Optional[bool] = None,
     ) -> Task:
         """
         Create a new task both in Google Tasks (if connected) and in local SQLite.
@@ -631,7 +752,10 @@ class GoogleTasksService:
         source = self.get_source_for_list(list_id)
         remote_task: Optional[Dict[str, Any]] = None
 
-        if self.is_authenticated():
+        if sync_remote is None:
+            sync_remote = (self.sync_manager is None)
+
+        if sync_remote and self.is_authenticated():
             try:
                 remote_task = self.client.create_task(
                     list_id=list_id,
@@ -707,6 +831,10 @@ class GoogleTasksService:
         if target_sched:
             self.daily_service.add_task_to_date(t_id, target_sched[:10])
 
+        if self.sync_manager:
+            self.sync_manager.notify_change()
+            self.sync_manager.trigger_sync()
+
         return task
 
     def update_task(
@@ -716,6 +844,7 @@ class GoogleTasksService:
         notes: Optional[str] = None,
         due_date: Optional[str] = None,
         clear_due: bool = False,
+        sync_remote: Optional[bool] = None,
     ) -> Optional[Task]:
         """
         Update task title, description/notes, and due date.
@@ -724,6 +853,9 @@ class GoogleTasksService:
         task = self.task_service.get_task_by_id(task_id)
         if not task:
             return None
+
+        if sync_remote is None:
+            sync_remote = (self.sync_manager is None)
 
         # Push to Google Tasks if linked
         if task.source_type == "google_tasks" and task.source_id:
@@ -741,7 +873,7 @@ class GoogleTasksService:
                 list_id = meta.get("list_id", "@default")
 
                 pushed = False
-                if not remote_id.startswith("local_") and self.is_authenticated():
+                if sync_remote and not remote_id.startswith("local_") and self.is_authenticated():
                     try:
                         self.client.update_task(
                             list_id=list_id,
@@ -755,7 +887,7 @@ class GoogleTasksService:
                     except (GoogleTasksNetworkError, requests_exception()):
                         pushed = False
 
-                if not pushed and not remote_id.startswith("local_"):
+                if not pushed:
                     self.enqueue_outbox(
                         action="update",
                         task_id=task_id,
@@ -797,13 +929,24 @@ class GoogleTasksService:
         elif due_date is not None and due_date.strip():
             self.daily_service.reschedule_task(task_id, due_date[:10])
 
+        if self.sync_manager:
+            self.sync_manager.notify_change()
+            self.sync_manager.trigger_sync()
+
         return updated_task
 
-    def toggle_task_completion(self, task_id: int) -> Optional[Task]:
+    def toggle_task_completion(
+        self,
+        task_id: int,
+        sync_remote: Optional[bool] = None,
+    ) -> Optional[Task]:
         """Toggle task completion and synchronize with Google Tasks."""
         task = self.task_service.get_task_by_id(task_id)
         if not task:
             return None
+
+        if sync_remote is None:
+            sync_remote = (self.sync_manager is None)
 
         new_status = "completed" if task.status == "pending" else "pending"
         self.task_service.update_task_status(task_id, new_status)
@@ -832,10 +975,14 @@ class GoogleTasksService:
                         "UPDATE daily_tasks SET completed_at = ? WHERE task_id = ?",
                         (now_iso if new_status == "completed" else None, task_id),
                     )
+                    cursor.execute(
+                        "UPDATE file_items SET completed = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+                        (1 if new_status == "completed" else 0, now_iso if new_status == "completed" else None, now_iso, task.source_id),
+                    )
                     conn.commit()
 
                 pushed = False
-                if not remote_id.startswith("local_") and self.is_authenticated():
+                if sync_remote and not remote_id.startswith("local_") and self.is_authenticated():
                     try:
                         self.client.set_task_completed(
                             list_id=list_id,
@@ -846,20 +993,31 @@ class GoogleTasksService:
                     except Exception:
                         pushed = False
 
-                if not pushed and not remote_id.startswith("local_"):
+                if not pushed:
                     self.enqueue_outbox(
                         action=action,
                         task_id=task_id,
                         payload={"list_id": list_id, "task_id": remote_id},
                     )
 
+        if self.sync_manager:
+            self.sync_manager.notify_change()
+            self.sync_manager.trigger_sync()
+
         return self.task_service.get_task_by_id(task_id)
 
-    def delete_task(self, task_id: int) -> bool:
+    def delete_task(
+        self,
+        task_id: int,
+        sync_remote: Optional[bool] = None,
+    ) -> bool:
         """Permanently delete a task locally and from Google Tasks."""
         task = self.task_service.get_task_by_id(task_id)
         if not task:
             return False
+
+        if sync_remote is None:
+            sync_remote = (self.sync_manager is None)
 
         if task.source_type == "google_tasks" and task.source_id:
             with self.db.get_connection() as conn:
@@ -870,12 +1028,17 @@ class GoogleTasksService:
                 )
                 fi_row = cursor.fetchone()
 
-            if fi_row and not fi_row["path"].startswith("local_"):
+            if fi_row and fi_row["path"].startswith("local_"):
+                with self.db.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM google_tasks_outbox WHERE task_id = ?", (task_id,))
+                    conn.commit()
+            elif fi_row:
                 remote_id = fi_row["path"]
                 meta = json.loads(fi_row["metadata"] or "{}")
                 list_id = meta.get("list_id", "@default")
                 pushed = False
-                if self.is_authenticated():
+                if sync_remote and self.is_authenticated():
                     try:
                         self.client.delete_task(list_id=list_id, task_id=remote_id)
                         pushed = True
@@ -895,7 +1058,11 @@ class GoogleTasksService:
                     cursor.execute("DELETE FROM file_items WHERE id = ?", (task.source_id,))
                     conn.commit()
 
-        return self.task_service.delete_task(task_id)
+        res = self.task_service.delete_task(task_id)
+        if self.sync_manager:
+            self.sync_manager.notify_change()
+            self.sync_manager.trigger_sync()
+        return res
 
 
 def requests_exception():

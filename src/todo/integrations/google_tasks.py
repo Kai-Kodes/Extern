@@ -10,7 +10,7 @@ import urllib.parse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import requests
 
@@ -352,8 +352,13 @@ class GoogleTasksClient:
 
     BASE_URL = "https://tasks.googleapis.com/tasks/v1"
 
-    def __init__(self, oauth_manager: GoogleOAuthManager):
+    def __init__(
+        self,
+        oauth_manager: GoogleOAuthManager,
+        timeout: Union[float, Tuple[float, float]] = (3.0, 7.0),
+    ):
         self.oauth_manager = oauth_manager
+        self.timeout = timeout
 
     def _request(
         self,
@@ -378,7 +383,7 @@ class GoogleTasksClient:
                 params=params,
                 json=json_body,
                 headers=headers,
-                timeout=15,
+                timeout=self.timeout,
             )
         except requests.RequestException as e:
             raise GoogleTasksNetworkError(f"Network connection failed: {e}")
@@ -394,7 +399,7 @@ class GoogleTasksClient:
                     params=params,
                     json=json_body,
                     headers=headers,
-                    timeout=15,
+                    timeout=self.timeout,
                 )
             except requests.RequestException as e:
                 raise GoogleTasksNetworkError(f"Network connection failed on retry: {e}")
@@ -442,8 +447,9 @@ class GoogleTasksClient:
         list_id: str,
         show_completed: bool = True,
         show_hidden: bool = True,
+        updated_min: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Retrieve all tasks in a task list."""
+        """Retrieve tasks in a task list, optionally filtered by updated_min (RFC 3339)."""
         all_tasks = []
         page_token = None
         while True:
@@ -452,6 +458,8 @@ class GoogleTasksClient:
                 "showCompleted": "true" if show_completed else "false",
                 "showHidden": "true" if show_hidden else "false",
             }
+            if updated_min:
+                params["updatedMin"] = updated_min
             if page_token:
                 params["pageToken"] = page_token
             data = self._request("GET", f"/lists/{list_id}/tasks", params=params)

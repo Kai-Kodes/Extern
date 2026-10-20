@@ -91,123 +91,166 @@ class GoogleTasksView:
         current_list_idx = 0
         current_list = lists[current_list_idx]
         selected_idx = 0
+        selected_task_id: Optional[int] = None
         search = LiveSearchController[Task]()
         status_msg: Optional[str] = None
         status_style = "green"
+        last_rendered_version = -1
+        last_rendered_list_idx = -1
+        last_rendered_query = None
+        last_rendered_status_text = ""
+        needs_redraw = True
 
         while True:
-            # 4. Instant local-first retrieval (< 5ms): only pending tasks are fetched
-            # Completed tasks are hidden from active views but preserved in SQLite and Timeline.
-            try:
-                if self.sync_manager:
+            sync_ver = self.sync_manager.change_version if self.sync_manager else 0
+            cur_status_text = (
+                self.sync_manager.get_status_text()
+                if self.sync_manager
+                else ("● Connected" if self.google_tasks_service.is_authenticated() else "● Offline mode (cached)")
+            )
+
+            if (
+                needs_redraw
+                or sync_ver != last_rendered_version
+                or current_list_idx != last_rendered_list_idx
+                or search.query != last_rendered_query
+                or cur_status_text != last_rendered_status_text
+                or status_msg is not None
+            ):
+                try:
+                    if self.sync_manager:
+                        tasks = self.google_tasks_service.get_tasks_for_list(current_list["id"], include_completed=False)
+                    else:
+                        self.google_tasks_service.sync_tasks_for_list(current_list["id"])
+                        tasks = self.google_tasks_service.get_tasks_for_list(current_list["id"], include_completed=False)
+                except GoogleTasksNotFoundError as e:
+                    status_msg = f"Task list '{current_list.get('title')}' was not found on Google Tasks (pruned from cache)."
+                    status_style = "bold yellow"
+                    lists, _ = self.google_tasks_service.sync_task_lists()
+                    if not lists:
+                        clear_viewport()
+                        render_header("GOOGLE TASKS")
+                        print_status_message(status_msg, style=status_style)
+                        console.print("\nNo other task lists available on Google Tasks.\n")
+                        render_footer([("b", "Back")])
+                        prompt_input("Press Enter to return...")
+                        return
+                    current_list_idx = 0
+                    current_list = lists[current_list_idx]
+                    selected_idx = 0
+                    selected_task_id = None
+                    needs_redraw = True
+                    continue
+                except Exception:
                     tasks = self.google_tasks_service.get_tasks_for_list(current_list["id"], include_completed=False)
+
+                active_tasks = search.filter(tasks) if search.query else tasks
+
+                # Anchor cursor stably by task ID across remote updates
+                if active_tasks:
+                    if selected_task_id is not None:
+                        found_idx = next((i for i, t in enumerate(active_tasks) if t.id == selected_task_id), None)
+                        if found_idx is not None:
+                            selected_idx = found_idx
+                        else:
+                            selected_idx = max(0, min(selected_idx, len(active_tasks) - 1))
+                    else:
+                        selected_idx = max(0, min(selected_idx, len(active_tasks) - 1))
+                    selected_task_id = active_tasks[selected_idx].id
                 else:
-                    self.google_tasks_service.sync_tasks_for_list(current_list["id"])
-                    tasks = self.google_tasks_service.get_tasks_for_list(current_list["id"], include_completed=False)
-            except GoogleTasksNotFoundError as e:
-                status_msg = f"Task list '{current_list.get('title')}' was not found on Google Tasks (pruned from cache)."
-                status_style = "bold yellow"
-                lists, _ = self.google_tasks_service.sync_task_lists()
-                if not lists:
-                    clear_viewport()
-                    render_header("GOOGLE TASKS")
+                    selected_idx = 0
+                    selected_task_id = None
+
+                clear_viewport()
+                subtitle = f"{current_list.get('title', 'Tasks')} · {cur_status_text}"
+                render_header("GOOGLE TASKS", subtitle=subtitle)
+
+                if status_msg:
                     print_status_message(status_msg, style=status_style)
-                    console.print("\nNo other task lists available on Google Tasks.\n")
-                    render_footer([("b", "Back")])
-                    prompt_input("Press Enter to return...")
-                    return
-                current_list_idx = 0
-                current_list = lists[current_list_idx]
-                selected_idx = 0
-                continue
-            except Exception:
-                tasks = self.google_tasks_service.get_tasks_for_list(current_list["id"], include_completed=False)
+                    status_msg = None
 
-            clear_viewport()
-            if self.sync_manager:
-                sub_status = self.sync_manager.get_status_text()
-            elif self.google_tasks_service.is_authenticated():
-                sub_status = "● Connected"
-            else:
-                sub_status = "● Offline mode (cached)"
+                # Handle search filtering
+                if search.is_active:
+                    console.print(f"  Search: [bold cyan]{search.query}[/bold cyan]█\n")
+                elif search.query:
+                    console.print(f"  Search: [bold cyan]{search.query}[/bold cyan] [dim](filter active, Esc to clear)[/dim]\n")
 
-            subtitle = f"{current_list.get('title', 'Tasks')} · {sub_status}"
-            render_header("GOOGLE TASKS", subtitle=subtitle)
-
-            if status_msg:
-                print_status_message(status_msg, style=status_style)
-                status_msg = None
-
-            # Handle search filtering
-            if search.is_active:
-                console.print(f"  Search: [bold cyan]{search.query}[/bold cyan]█\n")
-            elif search.query:
-                console.print(f"  Search: [bold cyan]{search.query}[/bold cyan] [dim](filter active, Esc to clear)[/dim]\n")
-
-            active_tasks = search.filter(tasks) if search.query else tasks
-
-            if not active_tasks:
-                if search.query:
-                    console.print("  [dim]No tasks matching search filter.[/dim]\n")
+                if not active_tasks:
+                    if search.query:
+                        console.print("  [dim]No tasks matching search filter.[/dim]\n")
+                    else:
+                        console.print("  [dim]No active tasks in this list. Press '+' to add a task.[/dim]\n")
                 else:
-                    console.print("  [dim]No active tasks in this list. Press '+' to add a task.[/dim]\n")
-            else:
-                if selected_idx >= len(active_tasks):
-                    selected_idx = max(0, len(active_tasks) - 1)
+                    table = Table.grid(padding=(0, 1))
+                    table.add_column("cursor", justify="right", style="cyan bold", width=2)
+                    table.add_column("num", justify="right", style="cyan bold", width=4)
+                    table.add_column("title", style="bold white")
+                    table.add_column("due", style="cyan", width=16)
+                    table.add_column("notes", style="dim")
 
-                table = Table.grid(padding=(0, 1))
-                table.add_column("cursor", justify="right", style="cyan bold", width=2)
-                table.add_column("num", justify="right", style="cyan bold", width=4)
-                table.add_column("title", style="bold white")
-                table.add_column("due", style="cyan", width=16)
-                table.add_column("notes", style="dim")
+                    for idx, t in enumerate(active_tasks):
+                        cursor = "▶" if idx == selected_idx else " "
+                        num_str = f"{idx + 1}."
 
-                for idx, t in enumerate(active_tasks):
-                    cursor = "▶" if idx == selected_idx else " "
-                    num_str = f"{idx + 1}."
+                        # Parse due date if scheduled in daily_tasks or metadata
+                        scheduled_date = self.daily_service.get_task_scheduled_date(t.id)
+                        due_str = f"[due: {scheduled_date}]" if scheduled_date else ""
 
-                    # Parse due date if scheduled in daily_tasks or metadata
-                    scheduled_date = self.daily_service.get_task_scheduled_date(t.id)
-                    due_str = f"[due: {scheduled_date}]" if scheduled_date else ""
+                        # Truncate notes
+                        notes_preview = t.description[:35] + "..." if len(t.description) > 35 else t.description
 
-                    # Truncate notes
-                    notes_preview = t.description[:35] + "..." if len(t.description) > 35 else t.description
+                        table.add_row(cursor, num_str, Text(t.title, style="bold white"), due_str, notes_preview)
 
-                    table.add_row(cursor, num_str, Text(t.title, style="bold white"), due_str, notes_preview)
+                    console.print(table)
+                    console.print()
 
-                console.print(table)
-                console.print()
+                # Footer hints
+                if search.is_active:
+                    render_footer([("↑/↓", "Navigate"), ("Enter", "Done"), ("Esc", "Cancel / Clear")])
+                elif search.query:
+                    render_footer([
+                        ("↑/↓", "Navigate"),
+                        ("Enter", "Complete"),
+                        ("Space", "Schedule"),
+                        ("Esc", "Clear search"),
+                        ("b", "Back"),
+                    ])
+                else:
+                    render_footer([
+                        ("↑/↓", "Navigate"),
+                        ("Enter", "Complete"),
+                        ("Space", "Schedule"),
+                        ("+", "Add task"),
+                        ("e", "Edit"),
+                        ("d", "Delete"),
+                        ("r", "Sync"),
+                        ("l", "Lists"),
+                        ("c", "Connect / Account"),
+                        ("/", "Search"),
+                        ("b", "Back"),
+                    ])
 
-            # Footer hints
-            if search.is_active:
-                render_footer([("↑/↓", "Navigate"), ("Enter", "Done"), ("Esc", "Cancel / Clear")])
-            elif search.query:
-                render_footer([
-                    ("↑/↓", "Navigate"),
-                    ("Enter", "Complete"),
-                    ("Space", "Schedule"),
-                    ("Esc", "Clear search"),
-                    ("b", "Back"),
-                ])
-            else:
-                render_footer([
-                    ("↑/↓", "Navigate"),
-                    ("Enter", "Complete"),
-                    ("Space", "Schedule"),
-                    ("+", "Add task"),
-                    ("e", "Edit"),
-                    ("d", "Delete"),
-                    ("r", "Sync"),
-                    ("l", "Lists"),
-                    ("c", "Connect / Account"),
-                    ("/", "Search"),
-                    ("b", "Back"),
-                ])
+                last_rendered_version = sync_ver
+                last_rendered_list_idx = current_list_idx
+                last_rendered_query = search.query
+                last_rendered_status_text = cur_status_text
+                needs_redraw = False
 
             k = key_reader.read_key(timeout=0.2)
             if k is None:
-                # Refresh render on background state change or timer
+                cur_ver = self.sync_manager.change_version if self.sync_manager else 0
+                cur_status = (
+                    self.sync_manager.get_status_text()
+                    if self.sync_manager
+                    else ("● Connected" if self.google_tasks_service.is_authenticated() else "● Offline mode (cached)")
+                )
+                if cur_ver != last_rendered_version or cur_status != last_rendered_status_text:
+                    needs_redraw = True
                 continue
+
+            if self.sync_manager:
+                self.sync_manager.record_user_activity()
+            needs_redraw = True
 
             if search.is_active:
                 handled, selected_idx = search.handle_key(k, len(active_tasks), selected_idx)

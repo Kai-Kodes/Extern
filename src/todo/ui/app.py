@@ -95,10 +95,14 @@ class TodoApp:
         )
         self.google_tasks_sync_manager = GoogleTasksSyncManager(
             google_tasks_service=self.google_tasks_service,
-            interval=60.0,
+            interval=self.config.google_sync_interval,
+            idle_interval=self.config.google_sync_idle_interval,
+            error_interval=self.config.google_sync_error_interval,
             date_provider=self.date_provider,
         )
+        self.google_tasks_service.sync_manager = self.google_tasks_sync_manager
         self.daily_service.google_tasks_service = self.google_tasks_service
+        self.daily_service.google_tasks_sync_manager = self.google_tasks_sync_manager
         self.task_editor = TaskEditor(
             task_service=self.task_service,
             daily_service=self.daily_service,
@@ -154,48 +158,80 @@ class TodoApp:
         status_msg: Optional[str] = None
         status_style: str = "green"
         selected_idx = 0
+        selected_task_id: Optional[int] = None
         selected_task_ids: Set[int] = set()
         mode: Optional[str] = None
+        last_rendered_version = -1
+        last_rendered_date = ""
+        last_rendered_mode = None
+        needs_redraw = True
 
         while True:
             try:
                 today_str = self.daily_service.get_today_str()
-                tasks = self.daily_service.get_active_tasks_for_date(today_str)
-                completed_cnt, total_cnt, _ = self.daily_service.get_progress_for_date(today_str)
+                current_version = self.google_tasks_sync_manager.change_version
 
-                # Clean up any stale selected_task_ids not in tasks
-                valid_ids = {dt.id for dt in tasks}
-                selected_task_ids.intersection_update(valid_ids)
+                if (
+                    needs_redraw
+                    or current_version != last_rendered_version
+                    or today_str != last_rendered_date
+                    or mode != last_rendered_mode
+                    or status_msg is not None
+                ):
+                    tasks = self.daily_service.get_active_tasks_for_date(today_str)
+                    completed_cnt, total_cnt, _ = self.daily_service.get_progress_for_date(today_str)
 
-                # Clamp selected_idx
-                if tasks:
-                    selected_idx = max(0, min(selected_idx, len(tasks) - 1))
-                else:
-                    selected_idx = 0
+                    # Clean up any stale selected_task_ids not in tasks
+                    valid_ids = {dt.id for dt in tasks}
+                    selected_task_ids.intersection_update(valid_ids)
 
-                # Render Today viewport
-                self.today_view.render(
-                    tasks,
-                    status_msg=status_msg,
-                    status_style=status_style,
-                    selected_idx=selected_idx,
-                    clear=True,
-                    current_date=today_str,
-                    completed_count=completed_cnt,
-                    total_count=total_cnt,
-                    selected_ids=selected_task_ids,
-                    mode=mode,
-                )
-                status_msg = None
-                status_style = "green"
+                    # Anchor cursor stably by task ID across remote updates
+                    if tasks:
+                        if selected_task_id is not None:
+                            found_idx = next((i for i, dt in enumerate(tasks) if dt.id == selected_task_id), None)
+                            if found_idx is not None:
+                                selected_idx = found_idx
+                            else:
+                                selected_idx = max(0, min(selected_idx, len(tasks) - 1))
+                        else:
+                            selected_idx = max(0, min(selected_idx, len(tasks) - 1))
+                        selected_task_id = tasks[selected_idx].id
+                    else:
+                        selected_idx = 0
+                        selected_task_id = None
 
-                choice = read_key(timeout=0.5)
+                    # Render Today viewport
+                    self.today_view.render(
+                        tasks,
+                        status_msg=status_msg,
+                        status_style=status_style,
+                        selected_idx=selected_idx,
+                        clear=True,
+                        current_date=today_str,
+                        completed_count=completed_cnt,
+                        total_count=total_cnt,
+                        selected_ids=selected_task_ids,
+                        mode=mode,
+                    )
+                    last_rendered_version = current_version
+                    last_rendered_date = today_str
+                    last_rendered_mode = mode
+                    status_msg = None
+                    status_style = "green"
+                    needs_redraw = False
+
+                choice = read_key(timeout=0.2)
                 if choice is None:
-                    # Timeout elapsed: check date rollover and refresh if date changed
+                    # Timeout elapsed: no key pressed.
+                    # Redraw only if remote sync mutated local data or date changed
                     cur_today = self.daily_service.get_today_str()
-                    if cur_today != today_str:
-                        continue
+                    cur_ver = self.google_tasks_sync_manager.change_version
+                    if cur_ver != last_rendered_version or cur_today != last_rendered_date:
+                        needs_redraw = True
                     continue
+
+                self.google_tasks_sync_manager.record_user_activity()
+                needs_redraw = True
 
                 if mode == "delete":
                     if choice in (Key.ESCAPE, "escape", "q", "cancel"):
@@ -204,9 +240,11 @@ class TodoApp:
                         continue
                     if choice in (Key.UP, "up") and tasks:
                         selected_idx = max(0, selected_idx - 1)
+                        selected_task_id = tasks[selected_idx].id
                         continue
                     if choice in (Key.DOWN, "down") and tasks:
                         selected_idx = min(len(tasks) - 1, selected_idx + 1)
+                        selected_task_id = tasks[selected_idx].id
                         continue
                     if choice in (Key.SPACE, "space", " ") and tasks:
                         cur_dt = tasks[selected_idx]
@@ -232,9 +270,11 @@ class TodoApp:
                         continue
                     if choice in (Key.UP, "up") and tasks:
                         selected_idx = max(0, selected_idx - 1)
+                        selected_task_id = tasks[selected_idx].id
                         continue
                     if choice in (Key.DOWN, "down") and tasks:
                         selected_idx = min(len(tasks) - 1, selected_idx + 1)
+                        selected_task_id = tasks[selected_idx].id
                         continue
                     if choice in (Key.SPACE, "space", " ") and tasks:
                         cur_dt = tasks[selected_idx]
@@ -260,11 +300,13 @@ class TodoApp:
                     if choice in (Key.UP, "up"):
                         if tasks:
                             selected_idx = max(0, selected_idx - 1)
+                            selected_task_id = tasks[selected_idx].id
                         continue
 
                     if choice in (Key.DOWN, "down"):
                         if tasks:
                             selected_idx = min(len(tasks) - 1, selected_idx + 1)
+                            selected_task_id = tasks[selected_idx].id
                         continue
 
                     if choice in (Key.ENTER, "enter"):
@@ -386,7 +428,7 @@ class TodoApp:
                 continue
 
             if choice in (Key.DOWN, "down"):
-                selected_idx = min(5, selected_idx + 1)
+                selected_idx = min(4, selected_idx + 1)
                 continue
 
             if choice in (Key.ENTER, "enter"):
@@ -412,10 +454,6 @@ class TodoApp:
                 self.manual_view.run(target_date=target_date)
                 return None
 
-            elif choice in ("6", "g", "gtasks"):
-                self.google_tasks_view.run(target_date=target_date)
-                return None
-
             else:
-                add_status = "Invalid option. Please choose 1, 2, 3, 4, 5, 6, or 'b' to go back."
+                add_status = "Invalid option. Please choose 1, 2, 3, 4, 5, or 'b' to go back."
 

@@ -37,7 +37,6 @@ class AddTaskView:
             ("3.", "YouTube", "(Import playlists or single video tasks)"),
             ("4.", "Universal Tasks", "(Pick an existing universal task)"),
             ("5.", "Manual", "(Type a new task)"),
-            ("6.", "Google Tasks", "(Browse lists and sync cloud tasks)"),
         ]
 
         table = Table.grid(padding=(0, 1))
@@ -53,4 +52,4 @@ class AddTaskView:
         console.print(table)
         console.print()
 
-        render_footer([("↑/↓", "Navigate"), ("Enter / 1-6", "Select"), ("b", "Back")])
+        render_footer([("↑/↓", "Navigate"), ("Enter / 1-5", "Select"), ("b", "Back")])
