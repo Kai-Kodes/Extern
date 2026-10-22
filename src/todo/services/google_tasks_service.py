@@ -255,12 +255,35 @@ class GoogleTasksService:
                         clear_due=payload.get("clear_due", False),
                     )
                 elif action == "create":
-                    created = self.client.create_task(
-                        list_id=payload["list_id"],
-                        title=payload["title"],
-                        notes=payload.get("notes", ""),
-                        due_date=payload.get("due_date"),
-                    )
+                    local_task_id = payload.get("local_task_id") or item.get("task_id")
+                    existing_remote_id = None
+                    if local_task_id:
+                        with self.db.get_connection() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute(
+                                "SELECT remote_id FROM task_google_tasks_map WHERE task_id = ?",
+                                (local_task_id,),
+                            )
+                            gtm_row = cursor.fetchone()
+                            if gtm_row and not gtm_row["remote_id"].startswith("local_"):
+                                existing_remote_id = gtm_row["remote_id"]
+
+                    if existing_remote_id:
+                        # Task was already created remotely on a previous attempt; update rather than duplicate
+                        created = self.client.update_task(
+                            list_id=payload["list_id"],
+                            task_id=existing_remote_id,
+                            title=payload.get("title"),
+                            notes=payload.get("notes"),
+                            due_date=payload.get("due_date"),
+                        ) or {"id": existing_remote_id}
+                    else:
+                        created = self.client.create_task(
+                            list_id=payload["list_id"],
+                            title=payload["title"],
+                            notes=payload.get("notes", ""),
+                            due_date=payload.get("due_date"),
+                        )
                     local_task_id = payload.get("local_task_id")
                     if local_task_id and created.get("id"):
                         remote_id = created["id"]
@@ -500,12 +523,16 @@ class GoogleTasksService:
         """Retrieve local tasks linked to this Google Task list."""
         source_path = f"google_tasks://list/{list_id}"
         query = """
-            SELECT t.id, t.title, t.description, t.source_type, t.source_id, t.status,
+            SELECT DISTINCT t.id, t.title, t.description, t.source_type, t.source_id, t.status,
                    t.created_at, t.updated_at
             FROM tasks t
-            JOIN file_items fi ON t.source_id = fi.id
-            JOIN sources s ON fi.source_id = s.id
-            WHERE s.path = ? AND t.source_type = 'google_tasks'
+            LEFT JOIN file_items fi ON t.source_id = fi.id
+            LEFT JOIN sources s ON fi.source_id = s.id
+            LEFT JOIN task_google_tasks_map m ON m.task_id = t.id
+            WHERE (
+                (s.path = ? AND t.source_type = 'google_tasks')
+                OR (m.list_id = ? AND NOT m.remote_id LIKE 'local_%')
+            )
         """
         if not include_completed:
             query += " AND t.status = 'pending'"
@@ -513,7 +540,7 @@ class GoogleTasksService:
 
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(query, (source_path,))
+            cursor.execute(query, (source_path, list_id))
             rows = cursor.fetchall()
 
         return [
@@ -598,55 +625,82 @@ class GoogleTasksService:
                 }
                 meta_json = json.dumps(metadata, ensure_ascii=False)
 
-                # Look up existing FileItem by path (which stores task_id)
+                # 1. Resolve existing local task:
+                # Check task_google_tasks_map first (covers manual, universal, and mapped google_tasks)
                 cursor.execute(
                     """
-                    SELECT id, title, completed, completed_at, metadata FROM file_items
-                    WHERE source_id = ? AND path = ?
+                    SELECT m.task_id, m.list_id, m.etag,
+                           t.id AS t_id, t.title AS t_title, t.description AS t_desc,
+                           t.source_type, t.source_id, t.status AS t_status
+                    FROM task_google_tasks_map m
+                    JOIN tasks t ON t.id = m.task_id
+                    WHERE m.remote_id = ?
                     """,
-                    (source.id, task_id),
+                    (task_id,),
                 )
-                existing_fi = cursor.fetchone()
+                mapped_row = cursor.fetchone()
 
-                if existing_fi:
-                    fi_id = existing_fi["id"]
-                    old_meta = json.loads(existing_fi["metadata"] or "{}")
-                    if (
-                        existing_fi["title"] != title
-                        or bool(existing_fi["completed"]) != is_remote_completed
-                        or old_meta.get("notes", "") != notes
-                        or old_meta.get("due") != due
-                        or old_meta.get("status") != status
-                    ):
-                        has_changes = True
+                existing_task = None
+                existing_fi = None
+                fi_id = None
+                t_id = None
+
+                if mapped_row:
+                    t_id = mapped_row["t_id"]
+                    existing_task = {
+                        "id": mapped_row["t_id"],
+                        "title": mapped_row["t_title"],
+                        "description": mapped_row["t_desc"] or "",
+                        "source_type": mapped_row["source_type"],
+                        "source_id": mapped_row["source_id"],
+                        "status": mapped_row["t_status"],
+                    }
+                    if mapped_row["source_type"] == "google_tasks" and mapped_row["source_id"]:
+                        cursor.execute(
+                            "SELECT id, title, completed, completed_at, metadata FROM file_items WHERE id = ?",
+                            (mapped_row["source_id"],),
+                        )
+                        existing_fi = cursor.fetchone()
+                        if existing_fi:
+                            fi_id = existing_fi["id"]
                 else:
-                    has_changes = True
+                    # Check file_items by path if not found in task_google_tasks_map
                     cursor.execute(
                         """
-                        INSERT INTO file_items (source_id, path, title, type, metadata, completed, completed_at, created_at, updated_at)
-                        VALUES (?, ?, ?, 'task', ?, ?, ?, ?, ?)
+                        SELECT id, title, completed, completed_at, metadata FROM file_items
+                        WHERE source_id = ? AND path = ?
                         """,
-                        (source.id, task_id, title, meta_json, 1 if is_remote_completed else 0, remote_completed_at, now_iso, now_iso),
+                        (source.id, task_id),
                     )
-                    fi_id = cursor.lastrowid
-
-                # Ensure linked Task entity exists
-                cursor.execute(
-                    """
-                    SELECT id, title, description, status FROM tasks
-                    WHERE source_type = 'google_tasks' AND source_id = ?
-                    """,
-                    (fi_id,),
-                )
-                existing_task = cursor.fetchone()
+                    existing_fi = cursor.fetchone()
+                    if existing_fi:
+                        fi_id = existing_fi["id"]
+                        cursor.execute(
+                            """
+                            SELECT id, title, description, source_type, source_id, status FROM tasks
+                            WHERE source_type = 'google_tasks' AND source_id = ?
+                            """,
+                            (fi_id,),
+                        )
+                        t_row = cursor.fetchone()
+                        if t_row:
+                            t_id = t_row["id"]
+                            existing_task = {
+                                "id": t_row["id"],
+                                "title": t_row["title"],
+                                "description": t_row["description"] or "",
+                                "source_type": t_row["source_type"],
+                                "source_id": t_row["source_id"],
+                                "status": t_row["status"],
+                            }
 
                 # Check if there are pending outbox items for this task
                 has_pending_outbox = False
                 pending_actions = set()
-                if existing_task:
+                if t_id:
                     cursor.execute(
                         "SELECT id, action, payload FROM google_tasks_outbox WHERE task_id = ?",
-                        (existing_task["id"],),
+                        (t_id,),
                     )
                     outbox_rows = cursor.fetchall()
                     if outbox_rows:
@@ -655,50 +709,92 @@ class GoogleTasksService:
 
                 if has_pending_outbox:
                     # Keep local status until outbox is drained
-                    task_status = existing_task["status"]
+                    task_status = existing_task["status"] if existing_task else "pending"
                     final_completed = (task_status == "completed")
                     final_completed_at = existing_fi["completed_at"] if existing_fi else None
-                    if "update" in pending_actions:
-                        title = existing_task["title"]
-                        notes = existing_task["description"] or ""
+                    if "update" in pending_actions and existing_task:
+                        title_to_save = existing_task["title"]
+                        notes_to_save = existing_task["description"] or ""
+                    else:
+                        title_to_save = title
+                        notes_to_save = notes
                 else:
                     # Remote status is authoritative
                     task_status = "completed" if is_remote_completed else "pending"
                     final_completed = is_remote_completed
                     final_completed_at = remote_completed_at or (now_iso if is_remote_completed else None)
+                    title_to_save = title
+                    notes_to_save = notes
 
-                # Update file_items
-                cursor.execute(
-                    """
-                    UPDATE file_items
-                    SET title = ?, metadata = ?, completed = ?, completed_at = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (title, meta_json, 1 if final_completed else 0, final_completed_at, now_iso, fi_id),
-                )
-
-                if existing_task:
-                    t_id = existing_task["id"]
-                    if existing_task["title"] != title or existing_task["description"] != notes or existing_task["status"] != task_status:
-                        has_changes = True
-                    cursor.execute(
-                        """
-                        UPDATE tasks
-                        SET title = ?, description = ?, status = ?, updated_at = ?
-                        WHERE id = ?
-                        """,
-                        (title, notes, task_status, now_iso, t_id),
-                    )
-                else:
+                if not existing_task:
                     has_changes = True
+                    if not fi_id:
+                        cursor.execute(
+                            """
+                            INSERT INTO file_items (source_id, path, title, type, metadata, completed, completed_at, created_at, updated_at)
+                            VALUES (?, ?, ?, 'task', ?, ?, ?, ?, ?)
+                            """,
+                            (source.id, task_id, title_to_save, meta_json, 1 if final_completed else 0, final_completed_at, now_iso, now_iso),
+                        )
+                        fi_id = cursor.lastrowid
+
                     cursor.execute(
                         """
                         INSERT INTO tasks (title, description, source_type, source_id, status, created_at, updated_at)
                         VALUES (?, ?, 'google_tasks', ?, ?, ?, ?)
                         """,
-                        (title, notes, fi_id, task_status, now_iso, now_iso),
+                        (title_to_save, notes_to_save, fi_id, task_status, now_iso, now_iso),
                     )
                     t_id = cursor.lastrowid
+                else:
+                    # Update existing task
+                    if (
+                        existing_task["title"] != title_to_save
+                        or existing_task["description"] != notes_to_save
+                        or existing_task["status"] != task_status
+                    ):
+                        has_changes = True
+                        cursor.execute(
+                            """
+                            UPDATE tasks
+                            SET title = ?, description = ?, status = ?, updated_at = ?
+                            WHERE id = ?
+                            """,
+                            (title_to_save, notes_to_save, task_status, now_iso, t_id),
+                        )
+
+                    if fi_id is not None:
+                        old_meta = json.loads(existing_fi["metadata"] or "{}") if existing_fi else {}
+                        if (
+                            existing_fi["title"] != title_to_save
+                            or bool(existing_fi["completed"]) != final_completed
+                            or old_meta.get("notes", "") != notes_to_save
+                            or old_meta.get("due") != due
+                            or old_meta.get("status") != status
+                        ):
+                            has_changes = True
+                        cursor.execute(
+                            """
+                            UPDATE file_items
+                            SET title = ?, metadata = ?, completed = ?, completed_at = ?, updated_at = ?
+                            WHERE id = ?
+                            """,
+                            (title_to_save, meta_json, 1 if final_completed else 0, final_completed_at, now_iso, fi_id),
+                        )
+
+                # Persist mapping in task_google_tasks_map
+                cursor.execute(
+                    """
+                    INSERT INTO task_google_tasks_map (task_id, list_id, remote_id, etag, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(task_id) DO UPDATE SET
+                        list_id = excluded.list_id,
+                        remote_id = excluded.remote_id,
+                        etag = excluded.etag,
+                        updated_at = excluded.updated_at
+                    """,
+                    (t_id, list_id, task_id, r_task.get("etag", ""), now_iso),
+                )
 
                 # Reconcile completion in daily_tasks
                 if final_completed:
@@ -753,18 +849,20 @@ class GoogleTasksService:
                             (t_id, due_date_str, max_pos + 1),
                         )
                 else:
-                    # Task does NOT have a due date: unschedule pending entries so it appears in Universal
-                    if sched_rows:
-                        pending_sched = [s for s in sched_rows if s["completed_at"] is None]
-                        if pending_sched:
-                            has_changes = True
-                        cursor.execute(
-                            """
-                            DELETE FROM daily_tasks
-                            WHERE task_id = ? AND completed_at IS NULL
-                            """,
-                            (t_id,),
-                        )
+                    # Task does NOT have a due date:
+                    # Only if this is a google_tasks item without due date, unschedule pending daily entries
+                    if existing_task and existing_task.get("source_type") == "google_tasks":
+                        if sched_rows:
+                            pending_sched = [s for s in sched_rows if s["completed_at"] is None]
+                            if pending_sched:
+                                has_changes = True
+                            cursor.execute(
+                                """
+                                DELETE FROM daily_tasks
+                                WHERE task_id = ? AND completed_at IS NULL
+                                """,
+                                (t_id,),
+                            )
 
             # Update source scanned_at and updated_at
             cursor.execute(
@@ -848,6 +946,18 @@ class GoogleTasksService:
                 (clean_title, notes.strip(), fi_id, now_iso, now_iso),
             )
             t_id = cursor.lastrowid
+            cursor.execute(
+                """
+                INSERT INTO task_google_tasks_map (task_id, list_id, remote_id, etag, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    list_id=excluded.list_id,
+                    remote_id=excluded.remote_id,
+                    etag=excluded.etag,
+                    updated_at=excluded.updated_at
+                """,
+                (t_id, list_id, task_path, remote_task.get("etag", "") if remote_task else "", now_iso),
+            )
             conn.commit()
 
         task = Task(

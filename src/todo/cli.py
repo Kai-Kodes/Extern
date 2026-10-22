@@ -230,6 +230,130 @@ def auth_cmd(timeout: int, no_browser: bool) -> None:
 cli.add_command(auth_cmd, name="google-auth")
 
 
+@cli.command("audit-duplicates")
+@click.option("--fix", is_flag=True, help="Safely reconcile detected duplicate task echoes.")
+def audit_duplicates_cmd(fix: bool) -> None:
+    """Audit and safely reconcile duplicate tasks across local and synced sources."""
+    from rich.table import Table
+
+    config = Config.load()
+    db = Database(config.db_path)
+
+    # First run a read-only detection query before any potential fix
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT 
+                t1.id AS original_id,
+                t1.title AS original_title,
+                t1.source_type AS original_source,
+                t1.status AS original_status,
+                t1.created_at AS original_created_at,
+                m.remote_id,
+                m.list_id,
+                t2.id AS echo_id,
+                t2.title AS echo_title,
+                t2.source_type AS echo_source,
+                t2.status AS echo_status,
+                t2.created_at AS echo_created_at
+            FROM task_google_tasks_map m
+            JOIN tasks t1 ON t1.id = m.task_id
+            JOIN file_items fi ON fi.path = m.remote_id
+            JOIN tasks t2 ON t2.source_id = fi.id
+            WHERE t1.id != t2.id
+              AND t1.source_type IN ('manual', 'universal')
+              AND t2.source_type = 'google_tasks'
+              AND t1.title = t2.title
+              AND NOT m.remote_id LIKE 'local_%'
+            ORDER BY t1.id ASC
+            """
+        )
+        echoes = [dict(r) for r in cursor.fetchall()]
+
+        # Also check for duplicate mappings sharing remote_id
+        cursor.execute(
+            """
+            SELECT m1.task_id AS orig_id, m2.task_id AS echo_id, m1.remote_id, m1.list_id
+            FROM task_google_tasks_map m1
+            JOIN task_google_tasks_map m2 ON m1.remote_id = m2.remote_id AND m1.task_id < m2.task_id
+            WHERE NOT m1.remote_id LIKE 'local_%'
+            """
+        )
+        dup_maps = [dict(r) for r in cursor.fetchall()]
+
+    console.print("\n[bold bright_white]TASK DUPLICATION AUDIT[/bold bright_white]\n")
+
+    if not echoes and not dup_maps:
+        console.print("[bold green]✓ No duplicate tasks or spurious echoes detected in database.[/bold green]\n")
+        return
+
+    # Display detected duplicate echo pairs in a clear table
+    table = Table(title="Detected Duplicate Task Pairs", show_header=True, header_style="bold cyan")
+    table.add_column("Task ID", style="bold yellow", justify="right")
+    table.add_column("Title", style="white")
+    table.add_column("Source", style="cyan")
+    table.add_column("Status", style="green")
+    table.add_column("Scheduled Date", style="blue")
+    table.add_column("Remote ID (Redacted)", style="dim")
+    table.add_column("Role", style="bold magenta")
+
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        for echo in echoes:
+            r = echo["remote_id"]
+            redacted_remote = f"{r[:4]}...{r[-4:]}" if len(r) > 8 else "***"
+
+            cursor.execute("SELECT date FROM daily_tasks WHERE task_id = ? ORDER BY date DESC LIMIT 1", (echo["original_id"],))
+            d1_row = cursor.fetchone()
+            d1_str = d1_row["date"] if d1_row else "(Universal)"
+
+            cursor.execute("SELECT date FROM daily_tasks WHERE task_id = ? ORDER BY date DESC LIMIT 1", (echo["echo_id"],))
+            d2_row = cursor.fetchone()
+            d2_str = d2_row["date"] if d2_row else "(Universal)"
+
+            table.add_row(
+                str(echo["original_id"]),
+                echo["original_title"],
+                echo["original_source"],
+                echo["original_status"],
+                d1_str,
+                redacted_remote,
+                "Original Task",
+            )
+            table.add_row(
+                str(echo["echo_id"]),
+                echo["echo_title"],
+                echo["echo_source"],
+                echo["echo_status"],
+                d2_str,
+                redacted_remote,
+                "Spurious Echo",
+            )
+
+    console.print(table)
+    console.print()
+
+    if fix:
+        console.print("[cyan]Reconciling detected duplicates...[/cyan]")
+        reconciled = db.reconcile_duplicate_echoes()
+        console.print(f"[bold green]✓ Successfully reconciled {len(reconciled)} duplicate echo pair(s):[/bold green]")
+        for item in reconciled:
+            r = item["remote_id"]
+            redacted_remote = f"{r[:4]}...{r[-4:]}" if len(r) > 8 else "***"
+            console.print(
+                f"  • Preserved original Task #{item['original_id']} ('{item['title']}'), "
+                f"removed echo Task #{item['echo_id']} (Remote: {redacted_remote})"
+            )
+        console.print("\n[green]All duplicate echoes resolved. Database is clean.[/green]\n")
+    else:
+        console.print(f"[bold yellow]Found {len(echoes)} duplicate echo pair(s).[/bold yellow]")
+        console.print("Run [bold cyan]todo audit-duplicates --fix[/bold cyan] to safely reconcile pre-existing duplicate echoes.\n")
+
+
+cli.add_command(audit_duplicates_cmd, name="reconcile-duplicates")
+
+
 def main() -> None:
     cli()
 

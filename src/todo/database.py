@@ -2,7 +2,7 @@
 
 import sqlite3
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 
 TABLES_SQL = """
@@ -350,8 +350,24 @@ class Database:
                 WHERE t.source_type = 'google_tasks'
                   AND fi.path IS NOT NULL
                   AND NOT fi.path LIKE 'local_%'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM task_google_tasks_map m
+                      WHERE m.remote_id = fi.path AND m.task_id != t.id
+                  )
                 """
             )
+
+            # Safely create unique index if no duplicates violate it
+            try:
+                cursor.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_gt_map_unique_remote
+                    ON task_google_tasks_map(list_id, remote_id)
+                    WHERE NOT remote_id LIKE 'local_%'
+                    """
+                )
+            except sqlite3.IntegrityError:
+                pass
 
             # 3. Create all indexes safely now that tables and columns are guaranteed to exist
             conn.executescript(INDEXES_SQL)
@@ -374,3 +390,160 @@ class Database:
                 )
 
             conn.commit()
+
+    def reconcile_duplicate_echoes(self, conn: Optional[sqlite3.Connection] = None) -> List[Dict[str, Any]]:
+        """
+        Safely reconcile spurious duplicate task echoes created when a local manual/universal
+        task was synced to Google Tasks and then re-imported as a google_tasks item.
+
+        Preserves original task ID, title, creation history, daily scheduling, completion state,
+        notes, outbox entries, calendar event associations, and remote task mapping.
+
+        Returns a list of reconciled duplicate summaries.
+        """
+        should_close = False
+        if conn is None:
+            conn = self.get_connection()
+            should_close = True
+
+        reconciled: List[Dict[str, Any]] = []
+        try:
+            cursor = conn.cursor()
+
+            # 1. Detect echoes where an original manual/universal task shares the same remote_id with a google_tasks item
+            cursor.execute(
+                """
+                SELECT 
+                    t1.id AS original_id,
+                    t1.title AS original_title,
+                    t1.description AS original_desc,
+                    t1.status AS original_status,
+                    t1.source_type AS original_source,
+                    t1.created_at AS original_created_at,
+                    m.remote_id,
+                    m.list_id,
+                    t2.id AS echo_id,
+                    t2.title AS echo_title,
+                    t2.description AS echo_desc,
+                    t2.status AS echo_status,
+                    t2.created_at AS echo_created_at,
+                    fi.id AS echo_fi_id
+                FROM task_google_tasks_map m
+                JOIN tasks t1 ON t1.id = m.task_id
+                JOIN file_items fi ON fi.path = m.remote_id
+                JOIN tasks t2 ON t2.source_id = fi.id
+                WHERE t1.id != t2.id
+                  AND t1.source_type IN ('manual', 'universal')
+                  AND t2.source_type = 'google_tasks'
+                  AND t1.title = t2.title
+                  AND NOT m.remote_id LIKE 'local_%'
+                ORDER BY t1.id ASC
+                """
+            )
+            echoes = [dict(r) for r in cursor.fetchall()]
+
+            for echo in echoes:
+                orig_id = echo["original_id"]
+                echo_id = echo["echo_id"]
+                echo_fi_id = echo["echo_fi_id"]
+
+                # A. Merge completion status if echo was completed
+                if echo["echo_status"] == "completed" and echo["original_status"] != "completed":
+                    cursor.execute(
+                        "UPDATE tasks SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (orig_id,),
+                    )
+                    cursor.execute(
+                        "SELECT completed_at FROM daily_tasks WHERE task_id = ? AND completed_at IS NOT NULL LIMIT 1",
+                        (echo_id,),
+                    )
+                    dt_completed = cursor.fetchone()
+                    if dt_completed:
+                        cursor.execute(
+                            "UPDATE daily_tasks SET completed_at = ? WHERE task_id = ? AND completed_at IS NULL",
+                            (dt_completed["completed_at"], orig_id),
+                        )
+
+                # B. Merge description/notes if original was empty
+                if echo["echo_desc"] and not echo["original_desc"]:
+                    cursor.execute(
+                        "UPDATE tasks SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (echo["echo_desc"], orig_id),
+                    )
+
+                # C. Handle daily_tasks scheduling
+                cursor.execute("SELECT id, date FROM daily_tasks WHERE task_id = ?", (orig_id,))
+                orig_daily = cursor.fetchall()
+                cursor.execute("SELECT id, date, position, completed_at FROM daily_tasks WHERE task_id = ?", (echo_id,))
+                echo_daily = cursor.fetchall()
+
+                if not orig_daily and echo_daily:
+                    cursor.execute("UPDATE daily_tasks SET task_id = ? WHERE task_id = ?", (orig_id, echo_id))
+                else:
+                    cursor.execute("DELETE FROM daily_tasks WHERE task_id = ?", (echo_id,))
+
+                # D. Consolidate dependent outbox, calendar, pomodoro associations
+                cursor.execute("UPDATE OR IGNORE google_tasks_outbox SET task_id = ? WHERE task_id = ?", (orig_id, echo_id))
+                cursor.execute("DELETE FROM google_tasks_outbox WHERE task_id = ?", (echo_id,))
+
+                cursor.execute("UPDATE OR IGNORE google_calendar_events SET task_id = ? WHERE task_id = ?", (orig_id, echo_id))
+                cursor.execute("DELETE FROM google_calendar_events WHERE task_id = ?", (echo_id,))
+
+                cursor.execute("DELETE FROM task_google_tasks_map WHERE task_id = ?", (echo_id,))
+
+                # E. Delete spurious echo task and linked file_item
+                cursor.execute("DELETE FROM tasks WHERE id = ?", (echo_id,))
+                if echo_fi_id:
+                    cursor.execute("DELETE FROM file_items WHERE id = ?", (echo_fi_id,))
+
+                reconciled.append({
+                    "original_id": orig_id,
+                    "echo_id": echo_id,
+                    "title": echo["original_title"],
+                    "remote_id": echo["remote_id"],
+                    "list_id": echo["list_id"],
+                })
+
+            # 2. Check for duplicate mappings in task_google_tasks_map sharing same remote_id
+            cursor.execute(
+                """
+                SELECT m1.task_id AS orig_id, m2.task_id AS echo_id, m1.remote_id, m1.list_id
+                FROM task_google_tasks_map m1
+                JOIN task_google_tasks_map m2 ON m1.remote_id = m2.remote_id AND m1.task_id < m2.task_id
+                WHERE NOT m1.remote_id LIKE 'local_%'
+                """
+            )
+            dup_maps = [dict(r) for r in cursor.fetchall()]
+            for dm in dup_maps:
+                cursor.execute("SELECT id, source_type, source_id, title FROM tasks WHERE id = ?", (dm["echo_id"],))
+                echo_task = cursor.fetchone()
+                if echo_task and echo_task["source_type"] == "google_tasks":
+                    cursor.execute("DELETE FROM task_google_tasks_map WHERE task_id = ?", (dm["echo_id"],))
+                    cursor.execute("DELETE FROM daily_tasks WHERE task_id = ?", (dm["echo_id"],))
+                    cursor.execute("DELETE FROM tasks WHERE id = ?", (dm["echo_id"],))
+                    if echo_task["source_id"]:
+                        cursor.execute("DELETE FROM file_items WHERE id = ?", (echo_task["source_id"],))
+                    reconciled.append({
+                        "original_id": dm["orig_id"],
+                        "echo_id": dm["echo_id"],
+                        "title": echo_task["title"],
+                        "remote_id": dm["remote_id"],
+                        "list_id": dm["list_id"],
+                    })
+
+            try:
+                cursor.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_gt_map_unique_remote
+                    ON task_google_tasks_map(list_id, remote_id)
+                    WHERE NOT remote_id LIKE 'local_%'
+                    """
+                )
+            except sqlite3.IntegrityError:
+                pass
+
+            conn.commit()
+            return reconciled
+        finally:
+            if should_close:
+                conn.close()
