@@ -219,15 +219,31 @@ def render_header(title: str, subtitle: Optional[str] = None) -> None:
     )
 
 
-def render_footer(hints: List[Tuple[str, str]]) -> None:
-    """Render a styled keyboard hints footer."""
+def render_footer(hints: List[Tuple[str, str]], status: Optional[str] = None) -> None:
+    """Render a styled keyboard hints footer, optionally including a sync status line."""
     console.print("[dim]─" * 50 + "[/dim]")
     parts = []
     for key, action in hints:
         # Escape any square brackets in keys
         escaped_key = key.replace("[", "\\[").replace("]", "\\]")
         parts.append(f"[bold cyan]{escaped_key}[/bold cyan] [dim]{action}[/dim]")
-    console.print("  " + "   ".join(parts) + "\n")
+    console.print("  " + "   ".join(parts))
+
+    if status:
+        if "[" in status and "]" in status:
+            styled_status = status
+        elif "Auth Needed" in status:
+            styled_status = f"[bold yellow]{status}[/bold yellow]"
+        elif "error" in status.lower():
+            styled_status = f"[bold red]{status}[/bold red]"
+        elif "Syncing" in status:
+            styled_status = f"[bold cyan]{status}[/bold cyan]"
+        elif "Synced" in status or "Connected" in status:
+            styled_status = f"[dim green]{status}[/dim green]"
+        else:
+            styled_status = f"[dim]{status}[/dim]"
+        console.print(f"  {styled_status}")
+    console.print()
 
 
 def print_status_message(message: str, style: str = "green") -> None:

@@ -114,13 +114,15 @@ class GoogleOAuthManager:
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
         credentials_file: Optional[Path] = None,
+        credentials_path: Optional[Path] = None,
     ):
         self.token_path = Path(token_path).expanduser().resolve()
         self.client_id = client_id
         self.client_secret = client_secret
+        resolved_cred = credentials_file or credentials_path
         self.credentials_file = (
-            Path(credentials_file).expanduser().resolve()
-            if credentials_file
+            Path(resolved_cred).expanduser().resolve()
+            if resolved_cred
             else None
         )
         self._tokens: Optional[GoogleOAuthTokens] = None
@@ -198,12 +200,20 @@ class GoogleOAuthManager:
         if not refresh_token and self._tokens and self._tokens.refresh_token:
             refresh_token = self._tokens.refresh_token
 
+        # Preserve existing scope if token_data omitted it (e.g. on token refresh)
+        if "scope" in token_data:
+            scope = token_data["scope"]
+        elif self._tokens and self._tokens.scope:
+            scope = self._tokens.scope
+        else:
+            scope = " ".join(self.DEFAULT_SCOPES)
+
         tokens = GoogleOAuthTokens(
             access_token=token_data.get("access_token", ""),
             refresh_token=refresh_token,
             expires_at=float(expires_at),
             token_type=token_data.get("token_type", "Bearer"),
-            scope=token_data.get("scope", " ".join(self.DEFAULT_SCOPES)),
+            scope=scope,
         )
         self._tokens = tokens
 
@@ -224,6 +234,11 @@ class GoogleOAuthManager:
             if tmp_path.exists():
                 tmp_path.unlink()
             raise GoogleTasksAuthError(f"Failed to persist token file: {e}")
+
+    def reload_tokens(self) -> Optional[GoogleOAuthTokens]:
+        """Force reloading tokens from disk."""
+        self._load_tokens_from_file()
+        return self._tokens
 
     def get_granted_scopes(self) -> List[str]:
         """Return list of scopes granted in the current stored token."""
@@ -268,6 +283,7 @@ class GoogleOAuthManager:
             "scope": " ".join(target_scopes),
             "access_type": "offline",
             "prompt": "consent",
+            "include_granted_scopes": "true",
         }
         if state:
             params["state"] = state
@@ -587,7 +603,7 @@ def run_loopback_auth_server(
                 html = (
                     "<html><body style='font-family: sans-serif; text-align: center; padding: 40px;'>"
                     "<h2 style='color: #2e7d32;'>Authorization Successful!</h2>"
-                    "<p>Extern has connected to Google Tasks. You may close this tab and return to your terminal.</p>"
+                    "<p>Extern has connected to Google Tasks and Google Calendar. You may close this tab and return to your terminal.</p>"
                     "</body></html>"
                 )
                 self.wfile.write(html.encode("utf-8"))

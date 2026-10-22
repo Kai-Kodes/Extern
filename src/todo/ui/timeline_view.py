@@ -29,12 +29,14 @@ class TimelineView:
         add_task_menu_fn: Optional[Callable[[Optional[str]], None]] = None,
         date_provider: Optional[Callable[[], datetime]] = None,
         task_editor: Optional[Any] = None,
+        sync_manager: Optional[Any] = None,
     ):
         self.daily_service = daily_service
         self.task_service = task_service
         self.add_task_menu_fn = add_task_menu_fn
         self.date_provider = date_provider
         self.task_editor = task_editor
+        self.sync_manager = sync_manager
 
     def get_today(self) -> date:
         """Return today's date from daily_service or injected clock."""
@@ -192,8 +194,9 @@ class TimelineView:
                 console.print()
 
             # Render contextual footer
+            sync_status = self.sync_manager.get_status_text() if getattr(self, "sync_manager", None) else None
             if search.is_active:
-                render_footer([("Enter", "Done"), ("Esc", "Cancel / Clear")])
+                render_footer([("Enter", "Done"), ("Esc", "Cancel / Clear")], status=sync_status)
             else:
                 hints = [
                     ("←/→", "Day"),
@@ -234,7 +237,7 @@ class TimelineView:
                             ("b", "Back"),
                         ]
                     )
-                render_footer(hints)
+                render_footer(hints, status=sync_status)
 
             # Read keyboard event
             k = key_reader.read_key()

@@ -62,7 +62,14 @@ class GoogleCalendarService:
 
     def needs_reauthorization(self) -> bool:
         """Check if authenticated for tasks but missing calendar scope."""
+        if not self.config.google_calendar_enabled:
+            return False
         return self.oauth_manager.needs_reauthorization_for_calendar()
+
+    def verify_access(self, calendar_id: Optional[str] = None) -> Dict[str, Any]:
+        """Safely verify Google Calendar access using the narrow calendar.events scope."""
+        cal_id = calendar_id or self.config.google_default_calendar
+        return self.client.verify_access(calendar_id=cal_id)
 
     # -------------------------------------------------------------------------
     # Local SQLite Calendar Cache
@@ -123,9 +130,20 @@ class GoogleCalendarService:
             calendars = self.client.list_calendars(min_access_role="writer")
             if calendars:
                 self.cache_calendars(calendars)
-            return self.get_cached_calendars()
         except Exception:
-            return self.get_cached_calendars()
+            pass
+
+        cached = self.get_cached_calendars()
+        if not cached:
+            # Seed default primary calendar if list_calendars was restricted by narrow scope
+            self.cache_calendars([{
+                "id": self.config.google_default_calendar,
+                "summary": "Primary Calendar",
+                "primary": True,
+                "accessRole": "owner",
+            }])
+            cached = self.get_cached_calendars()
+        return cached
 
     # -------------------------------------------------------------------------
     # Local Event Associations

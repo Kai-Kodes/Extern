@@ -61,6 +61,22 @@ class GoogleTasksView:
             if not connected and not self.google_tasks_service.get_cached_task_lists():
                 return
 
+        # 2b. Check if Calendar authorization is needed
+        cal_svc = getattr(self.sync_manager, "google_calendar_service", None)
+        if cal_svc and cal_svc.needs_reauthorization():
+            clear_viewport()
+            render_header("GOOGLE CALENDAR AUTHORIZATION")
+            console.print("[bold yellow]Google Tasks is connected, but Google Calendar authorization is required.[/bold yellow]\n")
+            console.print("To automatically schedule tasks to Google Calendar:\n")
+            console.print("  • Grant permission to view and edit events on your Google Calendars.")
+            console.print("  • Your existing Google Tasks authorization and data are preserved.\n")
+            render_footer([("a", "Authorize Calendar"), ("s", "Skip for now"), ("b", "Back")])
+            k = key_reader.read_key()
+            if k in ("a", "auth", "authorize", Key.ENTER, "enter"):
+                self._handle_oauth_connect(for_calendar=True)
+            elif k in ("b", "back", "q"):
+                return
+
         # 3. Retrieve task lists from local cache first (instant < 5ms)
         lists = self.google_tasks_service.get_cached_task_lists()
         if not lists:
@@ -388,10 +404,11 @@ class GoogleTasksView:
                 return "retry"
         return "back"
 
-    def _handle_oauth_connect(self) -> bool:
+    def _handle_oauth_connect(self, for_calendar: bool = False) -> bool:
         """Run the OAuth connection flow (loopback + manual code entry)."""
         clear_viewport()
-        render_header("CONNECT GOOGLE TASKS")
+        title = "AUTHORIZE GOOGLE CALENDAR" if for_calendar else "CONNECT GOOGLE ACCOUNT"
+        render_header(title)
 
         try:
             from todo.integrations.google_tasks import run_loopback_auth_server
@@ -404,6 +421,9 @@ class GoogleTasksView:
             key_reader.read_key()
             return False
 
+        if for_calendar:
+            console.print("[bold yellow]Adding Google Calendar events scope to your account.[/bold yellow]")
+            console.print("[dim]Existing Google Tasks authorization and data are preserved.[/dim]\n")
         console.print("Opening browser for Google authorization...\n")
         console.print(f"Authorization URL:\n[bold cyan]{auth_url}[/bold cyan]\n")
         console.print("[dim]If your browser does not open automatically, copy and visit the URL above.[/dim]\n")
@@ -429,8 +449,25 @@ class GoogleTasksView:
         try:
             self.google_tasks_service.oauth_manager.exchange_code(code_to_exchange, redirect_uri)
             clear_viewport()
-            render_header("GOOGLE TASKS CONNECTED")
-            console.print("[bold green]Successfully authenticated with Google Tasks![/bold green]\n")
+            has_cal = self.google_tasks_service.oauth_manager.has_calendar_scope()
+            cal_svc = getattr(self.sync_manager, "google_calendar_service", None)
+            if cal_svc and has_cal:
+                try:
+                    cal_svc.verify_access()
+                    cal_svc.sync_calendars_list()
+                except Exception:
+                    pass
+
+            if has_cal:
+                render_header("GOOGLE INTEGRATION CONNECTED")
+                console.print("[bold green]Successfully authorized Google Tasks & Google Calendar![/bold green]\n")
+            else:
+                render_header("GOOGLE TASKS CONNECTED")
+                console.print("[bold yellow]Google Tasks connected, but Calendar permission was not granted.[/bold yellow]\n")
+
+            if self.sync_manager:
+                self.sync_manager.trigger_sync()
+
             time.sleep(1)
             return True
         except Exception as e:
@@ -524,18 +561,32 @@ class GoogleTasksView:
     def _handle_connection_menu(self) -> None:
         """Connection and account management screen."""
         clear_viewport()
-        render_header("GOOGLE TASKS ACCOUNT")
+        render_header("GOOGLE INTEGRATION ACCOUNT")
         is_auth = self.google_tasks_service.is_authenticated()
-        status_text = "[bold green]Connected[/bold green]" if is_auth else "[bold yellow]Disconnected[/bold yellow]"
+        cal_svc = getattr(self.sync_manager, "google_calendar_service", None)
+        needs_cal_auth = bool(cal_svc and cal_svc.needs_reauthorization())
+
+        if not is_auth:
+            status_text = "[bold yellow]Disconnected[/bold yellow]"
+        elif needs_cal_auth:
+            status_text = "[bold yellow]Tasks Connected · Calendar Auth Needed[/bold yellow]"
+        else:
+            status_text = "[bold green]Tasks & Calendar Connected[/bold green]"
+
         console.print(f"Status: {status_text}\n")
         console.print(f"Token file: [dim]{self.google_tasks_service.oauth_manager.token_path}[/dim]\n")
 
         options = []
         if is_auth:
-            options.append(("1.", "Disconnect account"))
-            options.append(("2.", "Reconnect / Re-authenticate"))
+            if needs_cal_auth:
+                options.append(("1.", "Authorize Google Calendar (Events)"))
+                options.append(("2.", "Disconnect account"))
+                options.append(("3.", "Reconnect / Re-authenticate all"))
+            else:
+                options.append(("1.", "Disconnect account"))
+                options.append(("2.", "Reconnect / Re-authenticate"))
         else:
-            options.append(("1.", "Connect with Google"))
+            options.append(("1.", "Connect with Google (Tasks & Calendar)"))
 
         table = Table.grid(padding=(0, 1))
         table.add_column("num", style="cyan bold", width=4)
@@ -545,18 +596,30 @@ class GoogleTasksView:
 
         console.print(table)
         console.print()
-        render_footer([("1-2", "Select option"), ("b", "Back")])
+        render_footer([(f"1-{len(options)}", "Select option"), ("b", "Back")])
 
         k = key_reader.read_key()
         if is_auth:
-            if k in ("1", "disconnect"):
-                self.google_tasks_service.disconnect()
-                clear_viewport()
-                render_header("DISCONNECTED")
-                console.print("[bold yellow]Disconnected from Google Tasks.[/bold yellow]\n")
-                time.sleep(1)
-            elif k in ("2", "reconnect"):
-                self._handle_oauth_connect()
+            if needs_cal_auth:
+                if k in ("1", "calendar", "auth"):
+                    self._handle_oauth_connect(for_calendar=True)
+                elif k in ("2", "disconnect"):
+                    self.google_tasks_service.disconnect()
+                    clear_viewport()
+                    render_header("DISCONNECTED")
+                    console.print("[bold yellow]Disconnected from Google account.[/bold yellow]\n")
+                    time.sleep(1)
+                elif k in ("3", "reconnect"):
+                    self._handle_oauth_connect(for_calendar=False)
+            else:
+                if k in ("1", "disconnect"):
+                    self.google_tasks_service.disconnect()
+                    clear_viewport()
+                    render_header("DISCONNECTED")
+                    console.print("[bold yellow]Disconnected from Google account.[/bold yellow]\n")
+                    time.sleep(1)
+                elif k in ("2", "reconnect"):
+                    self._handle_oauth_connect(for_calendar=False)
         else:
             if k in ("1", "connect"):
-                self._handle_oauth_connect()
+                self._handle_oauth_connect(for_calendar=False)

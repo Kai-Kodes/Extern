@@ -120,6 +120,116 @@ def sources_cmd() -> None:
     console.print()
 
 
+@cli.command("auth")
+@click.option("--timeout", default=120, help="Authorization timeout in seconds (default: 120).")
+@click.option("--no-browser", is_flag=True, help="Do not attempt to open the system browser automatically.")
+def auth_cmd(timeout: int, no_browser: bool) -> None:
+    """Authorize or re-authorize Google Tasks and Google Calendar."""
+    import select
+    import time
+    import webbrowser
+    from todo.integrations.google_tasks import GoogleOAuthManager, run_loopback_auth_server
+    from todo.integrations.google_calendar import GoogleCalendarClient
+
+    config = Config.load()
+    oauth_manager = GoogleOAuthManager(
+        token_path=config.google_token_path,
+        credentials_file=config.google_credentials_file,
+    )
+
+    if not oauth_manager.has_configured_credentials():
+        console.print("[bold red]Google OAuth credentials not found.[/bold red]\n")
+        console.print(f"Please ensure credentials exist at: [dim]{config.google_credentials_file}[/dim]")
+        console.print("or configure 'client_id' and 'client_secret' in ~/.config/todo/config.toml.\n")
+        return
+
+    is_authenticated = oauth_manager.is_authenticated()
+    has_cal = oauth_manager.has_calendar_scope()
+
+    console.print("\n[bold bright_white]GOOGLE INTEGRATION AUTHORIZATION[/bold bright_white]\n")
+    if is_authenticated and not has_cal:
+        console.print("[bold yellow]Adding Google Calendar events scope to your account.[/bold yellow]")
+        console.print("[dim]Existing Google Tasks authorization and data are preserved.[/dim]\n")
+    elif is_authenticated:
+        console.print("[bold green]Google Tasks & Google Calendar are already authorized.[/bold green]")
+        console.print("[dim]Re-authorizing to refresh permissions...[/dim]\n")
+    else:
+        console.print("[bold cyan]Authorizing Google Tasks and Google Calendar...[/bold cyan]\n")
+
+    try:
+        auth_url, redirect_uri, captured = run_loopback_auth_server(
+            oauth_manager, timeout_seconds=timeout
+        )
+    except Exception as e:
+        console.print(f"[bold red]Failed to start local authorization server:[/bold red] {e}\n")
+        return
+
+    console.print(f"Authorization URL:\n[bold cyan]{auth_url}[/bold cyan]\n")
+    if not no_browser:
+        console.print("Opening your browser to complete authorization...\n")
+        try:
+            webbrowser.open(auth_url)
+        except Exception:
+            console.print("[dim]Could not open browser automatically. Please open the link above.[/dim]\n")
+    else:
+        console.print("Please visit the link above in your browser.\n")
+
+    console.print(f"[dim]Waiting up to {timeout}s for authorization callback...[/dim]")
+    console.print("[dim](Or paste the authorization code or redirect URL here)[/dim]\n")
+
+    code_to_exchange = None
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        if captured:
+            code_to_exchange = captured[0]
+            break
+        if sys.stdin and not sys.stdin.closed:
+            try:
+                rlist, _, _ = select.select([sys.stdin], [], [], 0.25)
+                if rlist:
+                    user_input = sys.stdin.readline().strip()
+                    if user_input:
+                        code_to_exchange = user_input
+                        break
+            except Exception:
+                time.sleep(0.25)
+        else:
+            time.sleep(0.25)
+
+    if not code_to_exchange:
+        console.print("[bold red]Authorization timed out or was cancelled.[/bold red]\n")
+        return
+
+    console.print("[cyan]Exchanging authorization code...[/cyan]")
+    try:
+        oauth_manager.exchange_code(code_to_exchange, redirect_uri)
+    except Exception as e:
+        console.print(f"[bold red]Failed to exchange authorization code:[/bold red] {e}\n")
+        return
+
+    tasks_ok = oauth_manager.has_tasks_scope()
+    cal_ok = oauth_manager.has_calendar_scope()
+
+    console.print("\n[bold green]✓ Authorization completed successfully![/bold green]")
+    console.print(f"  • Google Tasks: {'[green]Granted[/green]' if tasks_ok else '[yellow]Missing[/yellow]'}")
+    console.print(f"  • Google Calendar: {'[green]Granted[/green]' if cal_ok else '[yellow]Missing[/yellow]'}")
+
+    if cal_ok:
+        try:
+            cal_client = GoogleCalendarClient(oauth_manager=oauth_manager)
+            verification = cal_client.verify_access(calendar_id=config.google_default_calendar)
+            console.print(f"  • Primary Calendar: [green]Verified ({verification.get('summary', 'primary')})[/green]")
+        except Exception as e:
+            console.print(f"  • Calendar verification notice: [dim]{e}[/dim]")
+
+    console.print(f"\n[dim]Token securely saved to {oauth_manager.token_path} (0600 permissions).[/dim]")
+    console.print("[green]You can now launch 'todo' to use your synchronized tasks and calendar.[/green]\n")
+
+
+cli.add_command(auth_cmd, name="google-auth")
+
+
 def main() -> None:
     cli()
 

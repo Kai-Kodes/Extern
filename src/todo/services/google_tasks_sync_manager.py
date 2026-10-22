@@ -199,16 +199,30 @@ class GoogleTasksSyncManager:
             return "● Not configured"
         if not self.google_tasks_service.is_authenticated():
             return "● Not connected"
-        if self.google_calendar_service and self.google_calendar_service.needs_reauthorization():
+
+        cal_enabled = bool(
+            self.google_calendar_service and getattr(self.google_calendar_service.config, "google_calendar_enabled", True)
+        )
+
+        if cal_enabled and self.google_calendar_service and self.google_calendar_service.needs_reauthorization():
             if self.last_sync_time:
                 time_str = self.last_sync_time.strftime("%H:%M")
                 return f"● Tasks Synced {time_str} · Calendar Auth Needed"
             return "● Tasks Connected · Calendar Auth Needed"
+
         if self.is_syncing:
-            return "● Syncing…"
+            return "● Tasks & Calendar Syncing…" if cal_enabled else "● Tasks Syncing…"
+
         if self.last_error and not self.last_success:
             return "● Offline / Sync error"
+
+        if cal_enabled and self.google_calendar_service and self.google_calendar_service.is_authenticated():
+            if self.last_sync_time:
+                time_str = self.last_sync_time.strftime("%H:%M")
+                return f"● Connected · Tasks & Calendar Synced {time_str}"
+            return "● Tasks Connected · Calendar Connected"
+
         if self.last_sync_time:
             time_str = self.last_sync_time.strftime("%H:%M")
-            return f"● Connected · Synced {time_str}"
+            return f"● Connected · Tasks Synced {time_str}"
         return "● Connected"

@@ -128,7 +128,10 @@ class TodoApp:
             sync_manager=self.google_tasks_sync_manager,
         )
         self.universal_view = UniversalView(
-            self.task_service, self.daily_service, task_editor=self.task_editor
+            self.task_service,
+            self.daily_service,
+            task_editor=self.task_editor,
+            sync_manager=self.google_tasks_sync_manager,
         )
         self.manual_view = ManualView(self.task_service, self.daily_service)
         self.timeline_view = TimelineView(
@@ -137,6 +140,7 @@ class TodoApp:
             add_task_menu_fn=self.handle_add_task_menu,
             date_provider=self.date_provider,
             task_editor=self.task_editor,
+            sync_manager=self.google_tasks_sync_manager,
         )
 
         self.pomodoro_service = PomodoroService(self.db, date_provider=self.date_provider)
@@ -177,18 +181,21 @@ class TodoApp:
         last_rendered_version = -1
         last_rendered_date = ""
         last_rendered_mode = None
+        last_rendered_sync_status = ""
         needs_redraw = True
 
         while True:
             try:
                 today_str = self.daily_service.get_today_str()
                 current_version = self.google_tasks_sync_manager.change_version
+                cur_sync_status = self.google_tasks_sync_manager.get_status_text()
 
                 if (
                     needs_redraw
                     or current_version != last_rendered_version
                     or today_str != last_rendered_date
                     or mode != last_rendered_mode
+                    or cur_sync_status != last_rendered_sync_status
                     or status_msg is not None
                 ):
                     tasks = self.daily_service.get_active_tasks_for_date(today_str)
@@ -225,10 +232,12 @@ class TodoApp:
                         total_count=total_cnt,
                         selected_ids=selected_task_ids,
                         mode=mode,
+                        sync_status=cur_sync_status,
                     )
                     last_rendered_version = current_version
                     last_rendered_date = today_str
                     last_rendered_mode = mode
+                    last_rendered_sync_status = cur_sync_status
                     status_msg = None
                     status_style = "green"
                     needs_redraw = False
@@ -236,10 +245,15 @@ class TodoApp:
                 choice = read_key(timeout=0.2)
                 if choice is None:
                     # Timeout elapsed: no key pressed.
-                    # Redraw only if remote sync mutated local data or date changed
+                    # Redraw only if remote sync mutated local data, date changed, or status text changed
                     cur_today = self.daily_service.get_today_str()
                     cur_ver = self.google_tasks_sync_manager.change_version
-                    if cur_ver != last_rendered_version or cur_today != last_rendered_date:
+                    cur_status = self.google_tasks_sync_manager.get_status_text()
+                    if (
+                        cur_ver != last_rendered_version
+                        or cur_today != last_rendered_date
+                        or cur_status != last_rendered_sync_status
+                    ):
                         needs_redraw = True
                     continue
 

@@ -158,6 +158,25 @@ class GoogleCalendarClient:
         encoded_id = urllib.parse.quote(calendar_id, safe="")
         return self._request("GET", f"calendars/{encoded_id}")
 
+    def verify_access(self, calendar_id: str = "primary") -> Dict[str, Any]:
+        """
+        Safely verify Google Calendar access using the narrow calendar.events scope.
+        Queries events with maxResults=1 on the target calendar.
+        Returns a dict with 'verified': True, 'calendar_id': calendar_id, 'time_zone': ...
+        Does NOT create, update, or delete any events.
+        """
+        import urllib.parse
+        encoded_cal = urllib.parse.quote(calendar_id, safe="")
+        data = self._request("GET", f"calendars/{encoded_cal}/events", params={"maxResults": 1})
+        time_zone = data.get("timeZone", "UTC") if data else "UTC"
+        summary = data.get("summary", calendar_id) if data else calendar_id
+        return {
+            "verified": True,
+            "calendar_id": calendar_id,
+            "summary": summary,
+            "time_zone": time_zone,
+        }
+
     def get_event(self, calendar_id: str, event_id: str) -> Dict[str, Any]:
         """Retrieve a specific calendar event."""
         import urllib.parse

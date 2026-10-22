@@ -26,10 +26,12 @@ class UniversalView:
         task_service: TaskService,
         daily_service: DailyService,
         task_editor: Optional[Any] = None,
+        sync_manager: Optional[Any] = None,
     ):
         self.task_service = task_service
         self.daily_service = daily_service
         self.task_editor = task_editor
+        self.sync_manager = sync_manager
 
     def run(
         self, select_mode: bool = True, target_date: Optional[str] = None
@@ -76,13 +78,14 @@ class UniversalView:
                     console.print(
                         "  [dim italic]No universal tasks created yet.[/dim italic]\n"
                     )
+                sync_status = self.sync_manager.get_status_text() if getattr(self, "sync_manager", None) else None
                 if search.is_active:
                     hints = [("Enter", "Done"), ("Esc", "Cancel / Clear")]
                 elif delete_mode:
                     hints = [("Esc", "Cancel delete mode")]
                 else:
                     hints = [("+", "Add universal task"), ("/", "Search"), ("b", "Back")]
-                render_footer(hints)
+                render_footer(hints, status=sync_status)
             else:
                 if selected_idx >= len(active_tasks):
                     selected_idx = max(0, len(active_tasks) - 1)
@@ -147,6 +150,7 @@ class UniversalView:
                         ("b", "Back"),
                     ]
                 else:
+                    sync_status = self.sync_manager.get_status_text() if getattr(self, "sync_manager", None) else None
                     hints = [
                         ("↑/↓", "Navigate"),
                         ("Space", "Select"),
@@ -157,7 +161,7 @@ class UniversalView:
                         ("/", "Search"),
                         ("b", "Back"),
                     ]
-                render_footer(hints)
+                render_footer(hints, status=sync_status)
 
             k = key_reader.read_key()
 

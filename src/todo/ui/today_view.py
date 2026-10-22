@@ -39,6 +39,7 @@ class TodayView:
         total_count: Optional[int] = None,
         selected_ids: Optional[Set[int]] = None,
         mode: Optional[str] = None,
+        sync_status: Optional[str] = None,
     ) -> None:
         """Render the Today screen within the TUI viewport."""
         if clear:
@@ -69,14 +70,16 @@ class TodayView:
 
         if not tasks:
             console.print("  [dim italic]No tasks scheduled for today.[/dim italic]\n")
+            g_hint = "Google (Auth)" if sync_status and "Auth Needed" in sync_status else "Google"
             hints = [
                 ("+", "Add task"),
                 ("l", "Timeline"),
                 ("u", "Universal tasks"),
                 ("p", "Pomodoro"),
+                ("g", g_hint),
                 ("q", "Quit"),
             ]
-            render_footer(hints)
+            render_footer(hints, status=sync_status)
         else:
             table = Table.grid(padding=(0, 1))
             table.add_column("cursor", justify="right", style="cyan bold", width=2)
@@ -134,6 +137,7 @@ class TodayView:
                     ("q", "Quit"),
                 ]
             else:
+                g_hint = "Google (Auth)" if sync_status and "Auth Needed" in sync_status else "Google"
                 hints = [
                     ("↑/↓", "Navigate"),
                     ("Enter", "Toggle"),
@@ -144,9 +148,10 @@ class TodayView:
                     ("m", "Move to Universal"),
                     ("u", "Universal"),
                     ("p", "Pomodoro"),
+                    ("g", g_hint),
                     ("q", "Quit"),
                 ]
-            render_footer(hints)
+            render_footer(hints, status=sync_status)
 
     def handle_delete(
         self, tasks: List[DailyTask], current_idx: int = 0
