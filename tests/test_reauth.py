@@ -314,39 +314,60 @@ def test_calendar_sync_list_falls_back_gracefully_on_narrow_scope(test_env):
 # =============================================================================
 
 
-def test_today_view_renders_sync_status(test_env, capsys):
-    """TodayView.render renders sync status in the footer without crashing."""
+def test_today_view_omits_sync_status_in_footer(test_env, capsys):
+    """TodayView.render omits sync status text from the footer while preserving shortcut hints."""
     daily_svc: DailyService = DailyService(test_env["db"])
     task_svc: TaskService = TaskService(test_env["db"])
     view = TodayView(daily_svc, task_svc)
 
-    view.render(
-        tasks=[],
-        sync_status="● Tasks Connected · Calendar Auth Needed",
-        clear=False,
-    )
+    with patch("todo.ui.console.console.print") as mock_print:
+        view.render(
+            tasks=[],
+            sync_status="● Tasks Connected · Calendar Auth Needed",
+            clear=False,
+        )
 
-    # Render footer directly to verify markup
-    render_footer([("q", "Quit")], status="● Tasks Connected · Calendar Auth Needed")
+        all_calls = [str(call) for call in mock_print.call_args_list]
+        # Verify status text line is completely absent
+        assert not any("● Tasks Connected · Calendar Auth Needed" in c for c in all_calls)
+        assert not any("Calendar Auth Needed" in c for c in all_calls if "Google (Auth)" not in c)
+        # Verify shortcut hint for Google (Auth) is preserved
+        assert any("Google (Auth)" in c for c in all_calls)
 
 
-def test_footer_semantic_color_formatting(capsys):
-    """Footer renders semantic colors for Auth Needed (yellow), Syncing (cyan), and Synced (green)."""
+def test_footer_omits_status_and_extra_blank_rows():
+    """Footer completely omits sync status line and prevents extra blank rows."""
     with patch("todo.ui.console.console.print") as mock_print:
         render_footer([("q", "Quit")], status="● Tasks Connected · Calendar Auth Needed")
-        # Check that yellow styling was applied
-        found_yellow = any("bold yellow" in str(call) for call in mock_print.call_args_list)
-        assert found_yellow is True
+
+        # Must have exactly 3 print calls: divider, hints, trailing newline
+        assert mock_print.call_count == 3
+        calls = [call[0] for call in mock_print.call_args_list]
+
+        # 1. Divider
+        assert any("─" in str(arg) for arg in calls[0])
+        # 2. Hints
+        assert any("Quit" in str(arg) for arg in calls[1])
+        # 3. Trailing newline (empty call)
+        assert calls[2] == ()
+
+        # Assert no status or color styling from status was printed
+        all_printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "Calendar Auth Needed" not in all_printed
+        assert "bold yellow" not in all_printed
+        assert "bold cyan" not in all_printed or "Quit" in all_printed
 
     with patch("todo.ui.console.console.print") as mock_print:
         render_footer([("q", "Quit")], status="● Tasks & Calendar Syncing…")
-        found_cyan = any("bold cyan" in str(call) for call in mock_print.call_args_list)
-        assert found_cyan is True
+        assert mock_print.call_count == 3
+        all_printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "Syncing" not in all_printed
 
     with patch("todo.ui.console.console.print") as mock_print:
         render_footer([("q", "Quit")], status="● Connected · Tasks & Calendar Synced 10:15")
-        found_green = any("green" in str(call) for call in mock_print.call_args_list)
-        assert found_green is True
+        assert mock_print.call_count == 3
+        all_printed = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "Connected · Tasks & Calendar Synced" not in all_printed
 
 
 # =============================================================================

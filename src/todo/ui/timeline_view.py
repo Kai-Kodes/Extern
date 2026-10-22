@@ -194,9 +194,8 @@ class TimelineView:
                 console.print()
 
             # Render contextual footer
-            sync_status = self.sync_manager.get_status_text() if getattr(self, "sync_manager", None) else None
             if search.is_active:
-                render_footer([("Enter", "Done"), ("Esc", "Cancel / Clear")], status=sync_status)
+                render_footer([("Enter", "Done"), ("Esc", "Cancel / Clear")])
             else:
                 hints = [
                     ("←/→", "Day"),
@@ -237,7 +236,7 @@ class TimelineView:
                             ("b", "Back"),
                         ]
                     )
-                render_footer(hints, status=sync_status)
+                render_footer(hints)
 
             # Read keyboard event
             k = key_reader.read_key()

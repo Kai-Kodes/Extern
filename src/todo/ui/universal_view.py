@@ -78,14 +78,13 @@ class UniversalView:
                     console.print(
                         "  [dim italic]No universal tasks created yet.[/dim italic]\n"
                     )
-                sync_status = self.sync_manager.get_status_text() if getattr(self, "sync_manager", None) else None
                 if search.is_active:
                     hints = [("Enter", "Done"), ("Esc", "Cancel / Clear")]
                 elif delete_mode:
                     hints = [("Esc", "Cancel delete mode")]
                 else:
                     hints = [("+", "Add universal task"), ("/", "Search"), ("b", "Back")]
-                render_footer(hints, status=sync_status)
+                render_footer(hints)
             else:
                 if selected_idx >= len(active_tasks):
                     selected_idx = max(0, len(active_tasks) - 1)
@@ -150,7 +149,6 @@ class UniversalView:
                         ("b", "Back"),
                     ]
                 else:
-                    sync_status = self.sync_manager.get_status_text() if getattr(self, "sync_manager", None) else None
                     hints = [
                         ("↑/↓", "Navigate"),
                         ("Space", "Select"),
@@ -161,7 +159,7 @@ class UniversalView:
                         ("/", "Search"),
                         ("b", "Back"),
                     ]
-                render_footer(hints, status=sync_status)
+                render_footer(hints)
 
             k = key_reader.read_key()
 

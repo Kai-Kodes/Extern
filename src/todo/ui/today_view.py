@@ -79,7 +79,7 @@ class TodayView:
                 ("g", g_hint),
                 ("q", "Quit"),
             ]
-            render_footer(hints, status=sync_status)
+            render_footer(hints)
         else:
             table = Table.grid(padding=(0, 1))
             table.add_column("cursor", justify="right", style="cyan bold", width=2)
@@ -151,7 +151,7 @@ class TodayView:
                     ("g", g_hint),
                     ("q", "Quit"),
                 ]
-            render_footer(hints, status=sync_status)
+            render_footer(hints)
 
     def handle_delete(
         self, tasks: List[DailyTask], current_idx: int = 0

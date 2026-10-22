@@ -181,7 +181,7 @@ class TodoApp:
         last_rendered_version = -1
         last_rendered_date = ""
         last_rendered_mode = None
-        last_rendered_sync_status = ""
+        last_rendered_auth_needed = False
         needs_redraw = True
 
         while True:
@@ -189,13 +189,14 @@ class TodoApp:
                 today_str = self.daily_service.get_today_str()
                 current_version = self.google_tasks_sync_manager.change_version
                 cur_sync_status = self.google_tasks_sync_manager.get_status_text()
+                cur_auth_needed = "Auth Needed" in cur_sync_status
 
                 if (
                     needs_redraw
                     or current_version != last_rendered_version
                     or today_str != last_rendered_date
                     or mode != last_rendered_mode
-                    or cur_sync_status != last_rendered_sync_status
+                    or cur_auth_needed != last_rendered_auth_needed
                     or status_msg is not None
                 ):
                     tasks = self.daily_service.get_active_tasks_for_date(today_str)
@@ -237,7 +238,7 @@ class TodoApp:
                     last_rendered_version = current_version
                     last_rendered_date = today_str
                     last_rendered_mode = mode
-                    last_rendered_sync_status = cur_sync_status
+                    last_rendered_auth_needed = cur_auth_needed
                     status_msg = None
                     status_style = "green"
                     needs_redraw = False
@@ -245,14 +246,14 @@ class TodoApp:
                 choice = read_key(timeout=0.2)
                 if choice is None:
                     # Timeout elapsed: no key pressed.
-                    # Redraw only if remote sync mutated local data, date changed, or status text changed
+                    # Redraw only if remote sync mutated local data, date changed, or auth status changed
                     cur_today = self.daily_service.get_today_str()
                     cur_ver = self.google_tasks_sync_manager.change_version
-                    cur_status = self.google_tasks_sync_manager.get_status_text()
+                    cur_auth = "Auth Needed" in self.google_tasks_sync_manager.get_status_text()
                     if (
                         cur_ver != last_rendered_version
                         or cur_today != last_rendered_date
-                        or cur_status != last_rendered_sync_status
+                        or cur_auth != last_rendered_auth_needed
                     ):
                         needs_redraw = True
                     continue
