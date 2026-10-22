@@ -1,7 +1,7 @@
 """Service for managing core Task entities."""
 
 from datetime import datetime
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from todo.database import Database
 from todo.models import FileItem, Task
@@ -12,9 +12,13 @@ class TaskService:
         self,
         db: Database,
         date_provider: Optional[Callable[[], datetime]] = None,
+        google_tasks_service: Optional[Any] = None,
+        google_calendar_service: Optional[Any] = None,
     ):
         self.db = db
         self.date_provider = date_provider
+        self.google_tasks_service = google_tasks_service
+        self.google_calendar_service = google_calendar_service
 
     def get_now(self) -> datetime:
         """Return the current datetime, supporting injected test clocks."""
@@ -42,7 +46,7 @@ class TaskService:
             task_id = cursor.lastrowid
             conn.commit()
 
-        return Task(
+        task = Task(
             id=task_id,
             title=title.strip(),
             description=description.strip(),
@@ -52,6 +56,11 @@ class TaskService:
             created_at=now,
             updated_at=now,
         )
+
+        if source_type in ("manual", "universal") and getattr(self, "google_tasks_service", None):
+            self.google_tasks_service.sync_task_created(task)
+
+        return task
 
     def get_task_by_id(self, task_id: int) -> Optional[Task]:
         """Retrieve a task by ID."""
@@ -303,7 +312,7 @@ class TaskService:
                 )
                 conn.commit()
 
-        return Task(
+        updated_task = Task(
             id=row["id"],
             title=new_title,
             description=new_desc,
@@ -313,6 +322,18 @@ class TaskService:
             created_at=row["created_at"],
             updated_at=now,
         )
+
+        if getattr(self, "google_tasks_service", None):
+            self.google_tasks_service.sync_task_updated(
+                updated_task,
+                title=new_title if title is not None else None,
+                notes=new_desc if description is not None else None,
+            )
+
+        if getattr(self, "google_calendar_service", None):
+            self.google_calendar_service.on_task_edited(updated_task)
+
+        return updated_task
 
     def update_task_status(self, task_id: int, status: str) -> None:
         """Update the base status of a task and sync with FileItem if applicable."""
@@ -345,12 +366,20 @@ class TaskService:
         """
         if not task_ids:
             return 0
+
+        for t_id in task_ids:
+            if getattr(self, "google_tasks_service", None):
+                self.google_tasks_service.sync_task_deleted(t_id)
+            if getattr(self, "google_calendar_service", None):
+                self.google_calendar_service.on_task_deleted(t_id)
+
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             placeholders = ",".join("?" for _ in task_ids)
             cursor.execute(f"DELETE FROM tasks WHERE id IN ({placeholders})", task_ids)
             deleted = cursor.rowcount
             conn.commit()
+
         return deleted
 
     def delete_task(self, task_id: int) -> bool:

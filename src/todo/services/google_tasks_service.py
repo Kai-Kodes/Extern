@@ -134,8 +134,8 @@ class GoogleTasksService:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO google_tasks_outbox (task_id, action, payload, created_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO google_tasks_outbox (task_id, action, payload, created_at, target)
+                VALUES (?, ?, ?, ?, 'tasks')
                 """,
                 (task_id, action, payload_json, now_iso),
             )
@@ -144,13 +144,14 @@ class GoogleTasksService:
         return outbox_id
 
     def get_pending_outbox(self) -> List[Dict[str, Any]]:
-        """Retrieve all queued outbox records in FIFO order."""
+        """Retrieve all queued outbox records for Google Tasks in FIFO order."""
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT id, task_id, action, payload, created_at
                 FROM google_tasks_outbox
+                WHERE target = 'tasks' OR target IS NULL
                 ORDER BY id ASC
                 """
             )
@@ -163,6 +164,35 @@ class GoogleTasksService:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM google_tasks_outbox WHERE id = ?", (outbox_id,))
             conn.commit()
+
+    def get_task_google_mapping(self, task_id: int) -> Optional[Dict[str, Any]]:
+        """Resolve Google Tasks remote mapping for any task."""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT task_id, list_id, remote_id, etag, updated_at FROM task_google_tasks_map WHERE task_id = ?",
+                (task_id,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+
+            # Fallback to file_items if task.source_type == 'google_tasks'
+            cursor.execute("SELECT source_type, source_id FROM tasks WHERE id = ?", (task_id,))
+            t_row = cursor.fetchone()
+            if t_row and t_row["source_type"] == "google_tasks" and t_row["source_id"]:
+                cursor.execute("SELECT path, metadata FROM file_items WHERE id = ?", (t_row["source_id"],))
+                fi_row = cursor.fetchone()
+                if fi_row:
+                    meta = json.loads(fi_row["metadata"] or "{}")
+                    return {
+                        "task_id": task_id,
+                        "list_id": meta.get("list_id", "@default"),
+                        "remote_id": fi_row["path"],
+                        "etag": meta.get("etag", ""),
+                        "updated_at": fi_row["updated_at"] if "updated_at" in fi_row.keys() else "",
+                    }
+        return None
 
     def drain_outbox(self) -> int:
         """
@@ -185,17 +215,22 @@ class GoogleTasksService:
             if payload.get("task_id", "").startswith("local_") and item.get("task_id"):
                 with self.db.get_connection() as conn:
                     cursor = conn.cursor()
-                    cursor.execute(
-                        """
-                        SELECT fi.path FROM file_items fi
-                        JOIN tasks t ON t.source_id = fi.id
-                        WHERE t.id = ?
-                        """,
-                        (item["task_id"],),
-                    )
-                    fi_row = cursor.fetchone()
-                    if fi_row and not fi_row["path"].startswith("local_"):
-                        payload["task_id"] = fi_row["path"]
+                    cursor.execute("SELECT remote_id FROM task_google_tasks_map WHERE task_id = ?", (item["task_id"],))
+                    gtm_row = cursor.fetchone()
+                    if gtm_row and not gtm_row["remote_id"].startswith("local_"):
+                        payload["task_id"] = gtm_row["remote_id"]
+                    else:
+                        cursor.execute(
+                            """
+                            SELECT fi.path FROM file_items fi
+                            JOIN tasks t ON t.source_id = fi.id
+                            WHERE t.id = ?
+                            """,
+                            (item["task_id"],),
+                        )
+                        fi_row = cursor.fetchone()
+                        if fi_row and not fi_row["path"].startswith("local_"):
+                            payload["task_id"] = fi_row["path"]
 
             try:
                 if action == "complete":
@@ -232,6 +267,18 @@ class GoogleTasksService:
                         now_iso = self.get_now().isoformat()
                         with self.db.get_connection() as conn:
                             cursor = conn.cursor()
+                            cursor.execute(
+                                """
+                                INSERT INTO task_google_tasks_map (task_id, list_id, remote_id, etag, updated_at)
+                                VALUES (?, ?, ?, ?, ?)
+                                ON CONFLICT(task_id) DO UPDATE SET
+                                    list_id=excluded.list_id,
+                                    remote_id=excluded.remote_id,
+                                    etag=excluded.etag,
+                                    updated_at=excluded.updated_at
+                                """,
+                                (local_task_id, payload["list_id"], remote_id, created.get("etag", ""), now_iso),
+                            )
                             cursor.execute("SELECT source_id FROM tasks WHERE id = ?", (local_task_id,))
                             t_row = cursor.fetchone()
                             if t_row and t_row["source_id"]:
@@ -1063,6 +1110,129 @@ class GoogleTasksService:
             self.sync_manager.notify_change()
             self.sync_manager.trigger_sync()
         return res
+
+    def sync_task_created(
+        self,
+        task: Task,
+        scheduled_date: Optional[str] = None,
+        list_id: Optional[str] = None,
+    ) -> Optional[int]:
+        """
+        Synchronize a newly created manual or universal task to Google Tasks.
+        Idempotent: if already mapped, does not enqueue duplicate.
+        """
+        if not getattr(self.config, "google_tasks_enabled", True):
+            return None
+        if task.source_type in ("filemeta", "telegram", "youtube"):
+            return None
+        if self.get_task_google_mapping(task.id):
+            return None
+
+        target_list = list_id or getattr(self.config, "google_default_task_list", "@default")
+        temp_remote_id = f"local_{task.id}_{int(time.time() * 1000)}"
+        now_iso = self.get_now().isoformat()
+
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO task_google_tasks_map (task_id, list_id, remote_id, etag, updated_at)
+                VALUES (?, ?, ?, '', ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    list_id=excluded.list_id,
+                    remote_id=excluded.remote_id,
+                    updated_at=excluded.updated_at
+                """,
+                (task.id, target_list, temp_remote_id, now_iso),
+            )
+            conn.commit()
+
+        outbox_id = self.enqueue_outbox(
+            action="create",
+            task_id=task.id,
+            payload={
+                "list_id": target_list,
+                "title": task.title,
+                "notes": task.description or "",
+                "due_date": scheduled_date,
+                "local_task_id": task.id,
+                "task_id": temp_remote_id,
+            },
+        )
+        if self.sync_manager:
+            self.sync_manager.trigger_sync()
+        return outbox_id
+
+    def sync_task_updated(
+        self,
+        task: Task,
+        title: Optional[str] = None,
+        notes: Optional[str] = None,
+        due_date: Optional[str] = None,
+        clear_due: bool = False,
+    ) -> None:
+        """Propagate title, notes, or due-date changes to Google Tasks if task is mapped."""
+        mapping = self.get_task_google_mapping(task.id)
+        if not mapping:
+            return
+        list_id = mapping["list_id"]
+        remote_id = mapping["remote_id"]
+
+        self.enqueue_outbox(
+            action="update",
+            task_id=task.id,
+            payload={
+                "list_id": list_id,
+                "task_id": remote_id,
+                "title": title if title is not None else task.title,
+                "notes": notes if notes is not None else task.description,
+                "due_date": due_date,
+                "clear_due": clear_due,
+            },
+        )
+        if self.sync_manager:
+            self.sync_manager.trigger_sync()
+
+    def sync_task_completed(self, task_id: int, is_completed: bool) -> None:
+        """Propagate completion status to Google Tasks if task is mapped."""
+        mapping = self.get_task_google_mapping(task_id)
+        if not mapping:
+            return
+        list_id = mapping["list_id"]
+        remote_id = mapping["remote_id"]
+        action = "complete" if is_completed else "reopen"
+        self.enqueue_outbox(
+            action=action,
+            task_id=task_id,
+            payload={
+                "list_id": list_id,
+                "task_id": remote_id,
+            },
+        )
+        if self.sync_manager:
+            self.sync_manager.trigger_sync()
+
+    def sync_task_deleted(self, task_id: int) -> None:
+        """Delete task from Google Tasks if mapped and clean up mapping."""
+        mapping = self.get_task_google_mapping(task_id)
+        if mapping:
+            list_id = mapping["list_id"]
+            remote_id = mapping["remote_id"]
+            if not remote_id.startswith("local_"):
+                self.enqueue_outbox(
+                    action="delete",
+                    task_id=task_id,
+                    payload={
+                        "list_id": list_id,
+                        "task_id": remote_id,
+                    },
+                )
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM task_google_tasks_map WHERE task_id = ?", (task_id,))
+                conn.commit()
+            if self.sync_manager:
+                self.sync_manager.trigger_sync()
 
 
 def requests_exception():

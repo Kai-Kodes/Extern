@@ -27,10 +27,12 @@ class TaskEditor:
         task_service: TaskService,
         daily_service: DailyService,
         google_tasks_service: Optional[Any] = None,
+        google_calendar_service: Optional[Any] = None,
     ):
         self.task_service = task_service
         self.daily_service = daily_service
         self.google_tasks_service = google_tasks_service
+        self.google_calendar_service = google_calendar_service
 
     def edit_task(
         self,

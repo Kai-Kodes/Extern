@@ -113,12 +113,51 @@ CREATE TABLE IF NOT EXISTS google_task_lists_cache (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS google_calendars_cache (
+    id TEXT PRIMARY KEY,
+    summary TEXT NOT NULL,
+    description TEXT,
+    time_zone TEXT,
+    access_role TEXT,
+    primary_calendar INTEGER NOT NULL DEFAULT 0,
+    cached_at TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS google_calendar_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    calendar_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    summary TEXT,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    etag TEXT,
+    html_link TEXT,
+    status TEXT NOT NULL DEFAULT 'confirmed',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(task_id, calendar_id)
+);
+
+CREATE TABLE IF NOT EXISTS task_google_tasks_map (
+    task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    list_id TEXT NOT NULL,
+    remote_id TEXT NOT NULL,
+    etag TEXT,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS google_tasks_outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id INTEGER,
     action TEXT NOT NULL,
     payload TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    target TEXT NOT NULL DEFAULT 'tasks',
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    locked_until REAL DEFAULT 0.0
 );
 """
 
@@ -137,7 +176,12 @@ CREATE INDEX IF NOT EXISTS idx_daily_tasks_date ON daily_tasks(date);
 CREATE INDEX IF NOT EXISTS idx_daily_tasks_completed_at ON daily_tasks(completed_at);
 CREATE INDEX IF NOT EXISTS idx_telegram_cache_title ON telegram_channels_cache(title);
 CREATE INDEX IF NOT EXISTS idx_google_task_lists_cache_title ON google_task_lists_cache(title);
+CREATE INDEX IF NOT EXISTS idx_google_calendars_cache_summary ON google_calendars_cache(summary);
+CREATE INDEX IF NOT EXISTS idx_gcal_events_task ON google_calendar_events(task_id);
+CREATE INDEX IF NOT EXISTS idx_gcal_events_event ON google_calendar_events(calendar_id, event_id);
+CREATE INDEX IF NOT EXISTS idx_task_gt_map_remote ON task_google_tasks_map(list_id, remote_id);
 CREATE INDEX IF NOT EXISTS idx_google_tasks_outbox_created ON google_tasks_outbox(created_at);
+CREATE INDEX IF NOT EXISTS idx_google_tasks_outbox_target ON google_tasks_outbox(target, created_at);
 CREATE INDEX IF NOT EXISTS idx_pomodoro_presets_name ON pomodoro_presets(name);
 """
 
@@ -217,7 +261,7 @@ class Database:
             if "cached_at" not in gtc_columns:
                 cursor.execute("ALTER TABLE google_task_lists_cache ADD COLUMN cached_at TEXT")
 
-            # Ensure google_tasks_outbox table exists
+            # Ensure google_tasks_outbox table exists and has updated columns
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS google_tasks_outbox (
@@ -225,8 +269,87 @@ class Database:
                     task_id INTEGER,
                     action TEXT NOT NULL,
                     payload TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    target TEXT NOT NULL DEFAULT 'tasks',
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    locked_until REAL DEFAULT 0.0
                 )
+                """
+            )
+            cursor.execute("PRAGMA table_info(google_tasks_outbox)")
+            gto_columns = {row["name"] for row in cursor.fetchall()}
+            if "target" not in gto_columns:
+                cursor.execute("ALTER TABLE google_tasks_outbox ADD COLUMN target TEXT NOT NULL DEFAULT 'tasks'")
+            if "retry_count" not in gto_columns:
+                cursor.execute("ALTER TABLE google_tasks_outbox ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+            if "last_error" not in gto_columns:
+                cursor.execute("ALTER TABLE google_tasks_outbox ADD COLUMN last_error TEXT")
+            if "locked_until" not in gto_columns:
+                cursor.execute("ALTER TABLE google_tasks_outbox ADD COLUMN locked_until REAL DEFAULT 0.0")
+
+            # Ensure task_google_tasks_map table exists
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS task_google_tasks_map (
+                    task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+                    list_id TEXT NOT NULL,
+                    remote_id TEXT NOT NULL,
+                    etag TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+
+            # Ensure google_calendar_events and google_calendars_cache tables exist
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS google_calendars_cache (
+                    id TEXT PRIMARY KEY,
+                    summary TEXT NOT NULL,
+                    description TEXT,
+                    time_zone TEXT,
+                    access_role TEXT,
+                    primary_calendar INTEGER NOT NULL DEFAULT 0,
+                    cached_at TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS google_calendar_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    calendar_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    summary TEXT,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    etag TEXT,
+                    html_link TEXT,
+                    status TEXT NOT NULL DEFAULT 'confirmed',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(task_id, calendar_id)
+                )
+                """
+            )
+
+            # Backfill task_google_tasks_map from existing Google Tasks
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO task_google_tasks_map (task_id, list_id, remote_id, etag, updated_at)
+                SELECT t.id,
+                       COALESCE(json_extract(fi.metadata, '$.list_id'), '@default'),
+                       fi.path,
+                       COALESCE(json_extract(fi.metadata, '$.etag'), ''),
+                       t.updated_at
+                FROM tasks t
+                JOIN file_items fi ON t.source_id = fi.id
+                WHERE t.source_type = 'google_tasks'
+                  AND fi.path IS NOT NULL
+                  AND NOT fi.path LIKE 'local_%'
                 """
             )
 

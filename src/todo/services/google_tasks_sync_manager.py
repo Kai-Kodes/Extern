@@ -3,7 +3,7 @@
 import threading
 import time
 from datetime import datetime
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 from todo.services.google_tasks_service import GoogleTasksService
 
@@ -22,12 +22,14 @@ class GoogleTasksSyncManager:
     def __init__(
         self,
         google_tasks_service: GoogleTasksService,
+        google_calendar_service: Optional[Any] = None,
         interval: Optional[float] = None,
         idle_interval: Optional[float] = None,
         error_interval: Optional[float] = None,
         date_provider: Optional[Callable[[], datetime]] = None,
     ):
         self.google_tasks_service = google_tasks_service
+        self.google_calendar_service = google_calendar_service
         cfg = getattr(google_tasks_service, "config", None)
         self.active_interval = float(interval if interval is not None else getattr(cfg, "google_sync_interval", 3.0))
         self.idle_interval = float(idle_interval if idle_interval is not None else getattr(cfg, "google_sync_idle_interval", 15.0))
@@ -120,23 +122,48 @@ class GoogleTasksSyncManager:
 
         try:
             self.is_syncing = True
-            summary = self.google_tasks_service.sync_all_lists(incremental=incremental)
-            success = summary[0]
-            msg = summary[1]
-            has_changes = getattr(summary, "has_changes", False)
+            tasks_success = True
+            tasks_msg = "Google Tasks not authenticated"
+            tasks_has_changes = False
 
-            self.last_success = success
-            self.last_sync_status = msg
-            if success:
+            if self.google_tasks_service.is_authenticated():
+                summary = self.google_tasks_service.sync_all_lists(incremental=incremental)
+                tasks_success = summary[0]
+                tasks_msg = summary[1]
+                tasks_has_changes = getattr(summary, "has_changes", False)
+
+            cal_has_changes = False
+            cal_success = True
+            cal_msg = ""
+            if (
+                self.google_calendar_service
+                and getattr(self.google_calendar_service, "config", None)
+                and getattr(self.google_calendar_service.config, "google_calendar_enabled", True)
+            ):
+                if self.google_calendar_service.is_authenticated():
+                    try:
+                        drained_cal = self.google_calendar_service.drain_outbox()
+                        if drained_cal > 0:
+                            cal_has_changes = True
+                    except Exception as e:
+                        cal_success = False
+                        cal_msg = str(e)
+
+            overall_success = tasks_success and cal_success
+            has_changes = tasks_has_changes or cal_has_changes
+
+            self.last_success = overall_success
+            self.last_sync_status = tasks_msg if tasks_success else f"Tasks: {tasks_msg}"
+            if overall_success:
                 self.last_sync_time = self.get_now()
                 self.last_error = None
                 self._in_error_backoff = False
                 if has_changes:
                     self.notify_change()
             else:
-                self.last_error = msg
+                self.last_error = tasks_msg if not tasks_success else cal_msg
                 self._in_error_backoff = True
-            return success, msg
+            return overall_success, self.last_sync_status
         finally:
             self.is_syncing = False
             self._sync_lock.release()
@@ -153,8 +180,10 @@ class GoogleTasksSyncManager:
             if self._stop_event.is_set():
                 break
 
-            # Skip background sync if not authenticated
-            if not self.google_tasks_service.is_authenticated():
+            # Skip background sync if neither service is authenticated
+            tasks_auth = self.google_tasks_service.is_authenticated()
+            cal_auth = bool(self.google_calendar_service and self.google_calendar_service.is_authenticated())
+            if not tasks_auth and not cal_auth:
                 continue
 
             try:
@@ -170,6 +199,11 @@ class GoogleTasksSyncManager:
             return "● Not configured"
         if not self.google_tasks_service.is_authenticated():
             return "● Not connected"
+        if self.google_calendar_service and self.google_calendar_service.needs_reauthorization():
+            if self.last_sync_time:
+                time_str = self.last_sync_time.strftime("%H:%M")
+                return f"● Tasks Synced {time_str} · Calendar Auth Needed"
+            return "● Tasks Connected · Calendar Auth Needed"
         if self.is_syncing:
             return "● Syncing…"
         if self.last_error and not self.last_success:

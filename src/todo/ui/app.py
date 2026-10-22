@@ -13,6 +13,7 @@ from todo.integrations.youtube import YouTubeAdapter
 from todo.models import DailyTask
 from todo.services.audio_service import AudioService
 from todo.services.daily_service import DailyService
+from todo.services.google_calendar_service import GoogleCalendarService
 from todo.services.google_tasks_service import GoogleTasksService
 from todo.services.google_tasks_sync_manager import GoogleTasksSyncManager
 from todo.services.pomodoro_service import PomodoroService
@@ -93,20 +94,32 @@ class TodoApp:
             config=self.config,
             date_provider=self.date_provider,
         )
+        self.google_calendar_service = GoogleCalendarService(
+            db=self.db,
+            config=self.config,
+            date_provider=self.date_provider,
+            oauth_manager=self.google_tasks_service.oauth_manager,
+        )
         self.google_tasks_sync_manager = GoogleTasksSyncManager(
             google_tasks_service=self.google_tasks_service,
+            google_calendar_service=self.google_calendar_service,
             interval=self.config.google_sync_interval,
             idle_interval=self.config.google_sync_idle_interval,
             error_interval=self.config.google_sync_error_interval,
             date_provider=self.date_provider,
         )
         self.google_tasks_service.sync_manager = self.google_tasks_sync_manager
+        self.google_calendar_service.sync_manager = self.google_tasks_sync_manager
+        self.task_service.google_tasks_service = self.google_tasks_service
+        self.task_service.google_calendar_service = self.google_calendar_service
         self.daily_service.google_tasks_service = self.google_tasks_service
+        self.daily_service.google_calendar_service = self.google_calendar_service
         self.daily_service.google_tasks_sync_manager = self.google_tasks_sync_manager
         self.task_editor = TaskEditor(
             task_service=self.task_service,
             daily_service=self.daily_service,
             google_tasks_service=self.google_tasks_service,
+            google_calendar_service=self.google_calendar_service,
         )
         self.google_tasks_view = GoogleTasksView(
             google_tasks_service=self.google_tasks_service,

@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 import ast
 import os
 import tomllib
@@ -29,6 +29,13 @@ class Config:
     google_sync_idle_interval: float = 15.0
     google_sync_error_interval: float = 30.0
     google_sync_timeout: float = 7.0
+    google_tasks_enabled: bool = True
+    google_calendar_enabled: bool = True
+    google_default_task_list: str = "@default"
+    google_default_calendar: str = "primary"
+    google_calendar_delete_policy: str = "delete"  # 'delete' or 'keep'
+    google_calendar_unschedule_policy: str = "delete"  # 'delete' or 'keep'
+    google_calendar_complete_policy: str = "keep"  # 'keep' or 'delete'
 
     @classmethod
     def load(cls) -> "Config":
@@ -125,6 +132,22 @@ class Config:
         google_sync_error_interval = float(os.environ.get("TODO_GOOGLE_SYNC_ERROR_INTERVAL", "30.0"))
         google_sync_timeout = float(os.environ.get("TODO_GOOGLE_SYNC_TIMEOUT", "7.0"))
 
+        def _parse_bool(val: Any, default: bool) -> bool:
+            if val is None:
+                return default
+            if isinstance(val, bool):
+                return val
+            s = str(val).strip().lower()
+            return s in ("1", "true", "yes", "on")
+
+        google_tasks_enabled = _parse_bool(os.environ.get("TODO_GOOGLE_TASKS_ENABLED"), True)
+        google_calendar_enabled = _parse_bool(os.environ.get("TODO_GOOGLE_CALENDAR_ENABLED"), True)
+        google_default_task_list = str(os.environ.get("TODO_GOOGLE_DEFAULT_TASK_LIST", "@default")).strip()
+        google_default_calendar = str(os.environ.get("TODO_GOOGLE_DEFAULT_CALENDAR", "primary")).strip()
+        google_calendar_delete_policy = str(os.environ.get("TODO_GOOGLE_CALENDAR_DELETE_POLICY", "delete")).strip().lower()
+        google_calendar_unschedule_policy = str(os.environ.get("TODO_GOOGLE_CALENDAR_UNSCHEDULE_POLICY", "delete")).strip().lower()
+        google_calendar_complete_policy = str(os.environ.get("TODO_GOOGLE_CALENDAR_COMPLETE_POLICY", "keep")).strip().lower()
+
         if config_file.exists():
             try:
                 with open(config_file, "rb") as f:
@@ -185,6 +208,33 @@ class Config:
                         google_sync_error_interval = float(gt_sec["sync_error_interval"])
                     if "sync_timeout" in gt_sec:
                         google_sync_timeout = float(gt_sec["sync_timeout"])
+                    if "tasks_enabled" in gt_sec or "enabled" in gt_sec:
+                        google_tasks_enabled = _parse_bool(gt_sec.get("tasks_enabled", gt_sec.get("enabled")), True)
+                    if "calendar_enabled" in gt_sec:
+                        google_calendar_enabled = _parse_bool(gt_sec["calendar_enabled"], True)
+                    if "default_task_list" in gt_sec or "default_list" in gt_sec:
+                        google_default_task_list = str(gt_sec.get("default_task_list") or gt_sec.get("default_list")).strip()
+                    if "default_calendar" in gt_sec:
+                        google_default_calendar = str(gt_sec["default_calendar"]).strip()
+                    if "calendar_delete_policy" in gt_sec:
+                        google_calendar_delete_policy = str(gt_sec["calendar_delete_policy"]).strip().lower()
+                    if "calendar_unschedule_policy" in gt_sec:
+                        google_calendar_unschedule_policy = str(gt_sec["calendar_unschedule_policy"]).strip().lower()
+                    if "calendar_complete_policy" in gt_sec:
+                        google_calendar_complete_policy = str(gt_sec["calendar_complete_policy"]).strip().lower()
+
+                cal_sec = data.get("google_calendar")
+                if cal_sec and isinstance(cal_sec, dict):
+                    if "enabled" in cal_sec or "calendar_enabled" in cal_sec:
+                        google_calendar_enabled = _parse_bool(cal_sec.get("enabled", cal_sec.get("calendar_enabled")), True)
+                    if "default_calendar" in cal_sec:
+                        google_default_calendar = str(cal_sec["default_calendar"]).strip()
+                    if "delete_policy" in cal_sec or "calendar_delete_policy" in cal_sec:
+                        google_calendar_delete_policy = str(cal_sec.get("delete_policy", cal_sec.get("calendar_delete_policy"))).strip().lower()
+                    if "unschedule_policy" in cal_sec or "calendar_unschedule_policy" in cal_sec:
+                        google_calendar_unschedule_policy = str(cal_sec.get("unschedule_policy", cal_sec.get("calendar_unschedule_policy"))).strip().lower()
+                    if "complete_policy" in cal_sec or "calendar_complete_policy" in cal_sec:
+                        google_calendar_complete_policy = str(cal_sec.get("complete_policy", cal_sec.get("calendar_complete_policy"))).strip().lower()
             except Exception:
                 # If config parsing fails, fallback gracefully to defaults
                 pass
@@ -239,6 +289,13 @@ class Config:
             google_sync_idle_interval=google_sync_idle_interval,
             google_sync_error_interval=google_sync_error_interval,
             google_sync_timeout=google_sync_timeout,
+            google_tasks_enabled=google_tasks_enabled,
+            google_calendar_enabled=google_calendar_enabled,
+            google_default_task_list=google_default_task_list,
+            google_default_calendar=google_default_calendar,
+            google_calendar_delete_policy=google_calendar_delete_policy,
+            google_calendar_unschedule_policy=google_calendar_unschedule_policy,
+            google_calendar_complete_policy=google_calendar_complete_policy,
         )
 
     @classmethod

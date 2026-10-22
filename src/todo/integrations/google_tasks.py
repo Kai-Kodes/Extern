@@ -104,7 +104,9 @@ class GoogleOAuthManager:
     AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
     TOKEN_URL = "https://oauth2.googleapis.com/token"
     REVOKE_URL = "https://oauth2.googleapis.com/revoke"
-    DEFAULT_SCOPES = ["https://www.googleapis.com/auth/tasks"]
+    TASKS_SCOPE = "https://www.googleapis.com/auth/tasks"
+    CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events"
+    DEFAULT_SCOPES = [TASKS_SCOPE, CALENDAR_EVENTS_SCOPE]
 
     def __init__(
         self,
@@ -223,22 +225,47 @@ class GoogleOAuthManager:
                 tmp_path.unlink()
             raise GoogleTasksAuthError(f"Failed to persist token file: {e}")
 
+    def get_granted_scopes(self) -> List[str]:
+        """Return list of scopes granted in the current stored token."""
+        if not self._tokens or not self._tokens.scope:
+            return []
+        return self._tokens.scope.split()
+
+    def has_scope(self, scope: str) -> bool:
+        """Check if a specific scope is granted in the current token."""
+        granted = self.get_granted_scopes()
+        return scope in granted
+
+    def has_tasks_scope(self) -> bool:
+        """Check if Google Tasks scope is granted."""
+        return self.has_scope(self.TASKS_SCOPE)
+
+    def has_calendar_scope(self) -> bool:
+        """Check if Google Calendar events scope is granted."""
+        return self.has_scope(self.CALENDAR_EVENTS_SCOPE)
+
+    def needs_reauthorization_for_calendar(self) -> bool:
+        """Check if user has authenticated previously with tasks only and lacks calendar events scope."""
+        return self.is_authenticated() and not self.has_calendar_scope()
+
     def get_authorization_url(
         self,
         redirect_uri: str,
         state: Optional[str] = None,
         login_hint: Optional[str] = None,
+        scopes: Optional[List[str]] = None,
     ) -> str:
         """Build Google OAuth 2.0 authorization URL."""
         c_id, _ = self.get_credentials()
         if not c_id:
             raise GoogleTasksAuthError("Google OAuth Client ID is missing.")
 
+        target_scopes = scopes if scopes is not None else self.DEFAULT_SCOPES
         params = {
             "client_id": c_id,
             "redirect_uri": redirect_uri,
             "response_type": "code",
-            "scope": " ".join(self.DEFAULT_SCOPES),
+            "scope": " ".join(target_scopes),
             "access_type": "offline",
             "prompt": "consent",
         }

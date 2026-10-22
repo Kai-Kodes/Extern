@@ -14,10 +14,12 @@ class DailyService:
         db: Database,
         date_provider: Optional[Callable[[], datetime]] = None,
         google_tasks_service: Optional[Any] = None,
+        google_calendar_service: Optional[Any] = None,
     ):
         self.db = db
         self.date_provider = date_provider
         self.google_tasks_service = google_tasks_service
+        self.google_calendar_service = google_calendar_service
 
     def get_now(self) -> datetime:
         """Return the current datetime, supporting injected test clocks."""
@@ -245,9 +247,15 @@ class DailyService:
         from todo.services.task_service import TaskService
         task = TaskService(self.db, date_provider=self.date_provider).get_task_by_id(task_id)
 
-        # If it is a Google task, sync or queue its due date
+        # If it is a Google task or mapped, sync or queue its due date
         if task and task.source_type == "google_tasks" and task.source_id:
             self._set_google_task_due_date(task.id, task.source_id, date_str)
+        elif task and getattr(self, "google_tasks_service", None):
+            self.google_tasks_service.sync_task_updated(task, due_date=date_str)
+
+        # If google_calendar_service is attached, enqueue calendar event
+        if task and getattr(self, "google_calendar_service", None):
+            self.google_calendar_service.on_task_scheduled(task, date_str)
 
         dt = DailyTask(
             id=daily_id,
@@ -313,6 +321,12 @@ class DailyService:
         # Propagate completion to Google Tasks or outbox
         if source_type == "google_tasks" and source_id:
             self._sync_google_task_completion(task_id, source_id, is_completed)
+        elif getattr(self, "google_tasks_service", None):
+            self.google_tasks_service.sync_task_completed(task_id, is_completed)
+
+        # Notify google_calendar_service of completion state
+        if getattr(self, "google_calendar_service", None):
+            self.google_calendar_service.handle_task_completed(task_id, is_completed)
 
         # Fetch updated task
         from todo.services.task_service import TaskService
@@ -396,6 +410,16 @@ class DailyService:
         # 4. For Google tasks, clear due date locally and on remote / outbox
         for t_id, s_id in google_task_items:
             self._clear_google_task_due_date(t_id, s_id)
+
+        # 5. For all moved tasks, apply calendar unschedule and Google tasks due date clear
+        for t_id in task_ids:
+            if getattr(self, "google_calendar_service", None):
+                self.google_calendar_service.on_task_unscheduled(t_id)
+            if getattr(self, "google_tasks_service", None) and t_id not in [g[0] for g in google_task_items]:
+                from todo.services.task_service import TaskService
+                task_obj = TaskService(self.db, date_provider=self.date_provider).get_task_by_id(t_id)
+                if task_obj:
+                    self.google_tasks_service.sync_task_updated(task_obj, clear_due=True)
 
         return len(task_ids)
 
@@ -581,8 +605,23 @@ class DailyService:
                 return 0
 
             manual_task_ids = [r["task_id"] for r in rows if r["source_type"] == "manual"]
-            other_dt_ids = [r["dt_id"] for r in rows if r["source_type"] != "manual"]
+            other_rows = [r for r in rows if r["source_type"] != "manual"]
+            other_dt_ids = [r["dt_id"] for r in other_rows]
 
+        if manual_task_ids:
+            for m_id in manual_task_ids:
+                if getattr(self, "google_tasks_service", None):
+                    self.google_tasks_service.sync_task_deleted(m_id)
+                if getattr(self, "google_calendar_service", None):
+                    self.google_calendar_service.on_task_deleted(m_id)
+
+        if other_rows:
+            for r in other_rows:
+                if getattr(self, "google_calendar_service", None):
+                    self.google_calendar_service.on_task_unscheduled(r["task_id"])
+
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
             if manual_task_ids:
                 m_placeholders = ",".join("?" for _ in manual_task_ids)
                 cursor.execute(
@@ -596,7 +635,8 @@ class DailyService:
                     other_dt_ids,
                 )
             conn.commit()
-            return len(rows)
+
+        return len(rows)
 
     def remove_daily_task(self, daily_task_id: int) -> bool:
         """Remove a task from the daily schedule without deleting the task itself."""
@@ -818,6 +858,17 @@ class DailyService:
 
         from todo.services.task_service import TaskService
         task = TaskService(self.db, date_provider=self.date_provider).get_task_by_id(task_id)
+
+        # Propagate date change to Google Tasks if mapped
+        if task and task.source_type == "google_tasks" and task.source_id:
+            self._set_google_task_due_date(task.id, task.source_id, target_date)
+        elif task and getattr(self, "google_tasks_service", None):
+            self.google_tasks_service.sync_task_updated(task, due_date=target_date)
+
+        # Propagate date change to Google Calendar if attached
+        if task and getattr(self, "google_calendar_service", None):
+            self.google_calendar_service.on_task_rescheduled(task, target_date)
+
         return DailyTask(
             id=target_dt_id,
             task_id=task_id,
@@ -881,11 +932,26 @@ class DailyService:
         """Remove any active/pending daily schedule entries for a task without deleting the task entity."""
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("SELECT source_type, source_id FROM tasks WHERE id = ?", (task_id,))
+            t_row = cursor.fetchone()
             cursor.execute(
                 "DELETE FROM daily_tasks WHERE task_id = ? AND completed_at IS NULL",
                 (task_id,),
             )
             deleted = cursor.rowcount > 0
             conn.commit()
-            return deleted
+
+        if deleted and t_row:
+            if t_row["source_type"] == "google_tasks" and t_row["source_id"]:
+                self._clear_google_task_due_date(task_id, t_row["source_id"])
+            elif getattr(self, "google_tasks_service", None):
+                from todo.services.task_service import TaskService
+                task_obj = TaskService(self.db, date_provider=self.date_provider).get_task_by_id(task_id)
+                if task_obj:
+                    self.google_tasks_service.sync_task_updated(task_obj, clear_due=True)
+
+            if getattr(self, "google_calendar_service", None):
+                self.google_calendar_service.on_task_unscheduled(task_id)
+
+        return deleted
 
