@@ -280,6 +280,7 @@ class GoogleCalendarService:
                     start_date = payload["date"]
                     title = payload.get("title", "")
                     description = payload.get("description", "")
+                    source = payload.get("source", "extern")
                     exclusive_end = calculate_exclusive_end_date(start_date)
 
                     # Idempotency check: see if event was already created
@@ -301,6 +302,7 @@ class GoogleCalendarService:
                             title=title,
                             start_date=start_date,
                             description=description,
+                            source=source,
                         )
                     else:
                         res = self.client.create_all_day_event(
@@ -309,6 +311,7 @@ class GoogleCalendarService:
                             title=title,
                             start_date=start_date,
                             description=description,
+                            source=source,
                         )
 
                     if res and res.get("id"):
@@ -334,6 +337,7 @@ class GoogleCalendarService:
 
                     if event_id:
                         start_date = payload.get("date")
+                        source = payload.get("source", "extern")
                         res = self.client.update_all_day_event(
                             calendar_id=cal_id,
                             event_id=event_id,
@@ -341,6 +345,7 @@ class GoogleCalendarService:
                             title=payload.get("title"),
                             start_date=start_date,
                             description=payload.get("description"),
+                            source=source,
                         )
                         if res and res.get("id"):
                             exclusive_end = calculate_exclusive_end_date(start_date) if start_date else (existing_mapping.get("end_date", "") if existing_mapping else "")
@@ -410,6 +415,7 @@ class GoogleCalendarService:
                 "title": task.title,
                 "description": task.description or "",
                 "date": scheduled_date[:10],
+                "source": task.source_type or "extern",
             },
         )
         if self.sync_manager:
@@ -430,6 +436,7 @@ class GoogleCalendarService:
                 "title": task.title,
                 "description": task.description or "",
                 "date": new_date[:10],
+                "source": task.source_type or "extern",
             },
         )
         if self.sync_manager:

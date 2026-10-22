@@ -205,6 +205,7 @@ class GoogleCalendarClient:
         start_date: str,
         description: str = "",
         end_date: Optional[str] = None,
+        source: str = "extern",
     ) -> Dict[str, Any]:
         """
         Create an all-day event correlated with an Extern task.
@@ -222,7 +223,7 @@ class GoogleCalendarClient:
             "extendedProperties": {
                 "private": {
                     "extern_task_id": str(task_id),
-                    "extern_source": "extern",
+                    "extern_source": source,
                 }
             },
         }
@@ -240,6 +241,7 @@ class GoogleCalendarClient:
         start_date: Optional[str] = None,
         description: Optional[str] = None,
         end_date: Optional[str] = None,
+        source: str = "extern",
     ) -> Dict[str, Any]:
         """
         Patch an existing all-day event correlated with an Extern task.
@@ -253,7 +255,7 @@ class GoogleCalendarClient:
             "extendedProperties": {
                 "private": {
                     "extern_task_id": str(task_id),
-                    "extern_source": "extern",
+                    "extern_source": source,
                 }
             }
         }

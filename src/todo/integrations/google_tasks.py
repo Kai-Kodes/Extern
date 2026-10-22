@@ -523,16 +523,23 @@ class GoogleTasksClient:
         title: str,
         notes: str = "",
         due_date: Optional[str] = None,
+        status: Optional[str] = None,
+        completed: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Create a new task in a list.
         due_date can be YYYY-MM-DD or RFC 3339. It will be converted to UTC midnight RFC 3339.
+        status can be 'needsAction' or 'completed'.
         """
         body: Dict[str, Any] = {"title": title.strip()}
         if notes:
             body["notes"] = notes.strip()
         if due_date:
             body["due"] = format_rfc3339_due_date(due_date)
+        if status:
+            body["status"] = status
+            if status == "completed":
+                body["completed"] = completed or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         return self._request("POST", f"/lists/{list_id}/tasks", json_body=body)
 
     def update_task(
@@ -543,6 +550,7 @@ class GoogleTasksClient:
         notes: Optional[str] = None,
         due_date: Optional[str] = None,
         status: Optional[str] = None,
+        completed: Optional[str] = None,
         clear_due: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -561,7 +569,7 @@ class GoogleTasksClient:
         if status is not None:
             body["status"] = status
             if status == "completed":
-                body["completed"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                body["completed"] = completed or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             else:
                 body["completed"] = None
 

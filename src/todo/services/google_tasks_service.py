@@ -276,6 +276,8 @@ class GoogleTasksService:
                             title=payload.get("title"),
                             notes=payload.get("notes"),
                             due_date=payload.get("due_date"),
+                            status=payload.get("status"),
+                            completed=payload.get("completed"),
                         ) or {"id": existing_remote_id}
                     else:
                         created = self.client.create_task(
@@ -283,6 +285,8 @@ class GoogleTasksService:
                             title=payload["title"],
                             notes=payload.get("notes", ""),
                             due_date=payload.get("due_date"),
+                            status=payload.get("status"),
+                            completed=payload.get("completed"),
                         )
                     local_task_id = payload.get("local_task_id")
                     if local_task_id and created.get("id"):
@@ -341,12 +345,26 @@ class GoogleTasksService:
                 # Target resource no longer exists remotely, drop mutation safely
                 self.remove_outbox_item(item["id"])
                 processed += 1
-            except (GoogleTasksNetworkError, requests_exception()):
-                # Network failed, pause draining until next sync pass
+            except (GoogleTasksNetworkError, requests_exception()) as e:
+                # Network failed, record error and pause draining until next sync pass
+                with self.db.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE google_tasks_outbox SET retry_count = retry_count + 1, last_error = ? WHERE id = ?",
+                        (str(e), item["id"]),
+                    )
+                    conn.commit()
                 break
-            except Exception:
-                # Drop unrecoverable malformed item
-                self.remove_outbox_item(item["id"])
+            except Exception as e:
+                # Malformed or unexpected error, record error and pause
+                with self.db.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE google_tasks_outbox SET retry_count = retry_count + 1, last_error = ? WHERE id = ?",
+                        (str(e), item["id"]),
+                    )
+                    conn.commit()
+                break
 
         return processed
 
@@ -1226,6 +1244,8 @@ class GoogleTasksService:
         task: Task,
         scheduled_date: Optional[str] = None,
         list_id: Optional[str] = None,
+        status: Optional[str] = None,
+        completed: Optional[str] = None,
     ) -> Optional[int]:
         """
         Synchronize a newly created manual or universal task to Google Tasks.
@@ -1257,17 +1277,28 @@ class GoogleTasksService:
             )
             conn.commit()
 
+        if status is None and getattr(task, "completed", False):
+            status = "completed"
+        if completed is None and getattr(task, "completed", False) and getattr(task, "completed_at", None):
+            completed = task.completed_at
+
+        payload = {
+            "list_id": target_list,
+            "title": task.title,
+            "notes": task.description or "",
+            "due_date": scheduled_date,
+            "local_task_id": task.id,
+            "task_id": temp_remote_id,
+        }
+        if status:
+            payload["status"] = status
+        if completed:
+            payload["completed"] = completed
+
         outbox_id = self.enqueue_outbox(
             action="create",
             task_id=task.id,
-            payload={
-                "list_id": target_list,
-                "title": task.title,
-                "notes": task.description or "",
-                "due_date": scheduled_date,
-                "local_task_id": task.id,
-                "task_id": temp_remote_id,
-            },
+            payload=payload,
         )
         if self.sync_manager:
             self.sync_manager.trigger_sync()

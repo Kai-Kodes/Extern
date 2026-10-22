@@ -2,6 +2,7 @@
 
 import sys
 from datetime import datetime
+from typing import Optional
 
 import click
 from rich.table import Table
@@ -352,6 +353,143 @@ def audit_duplicates_cmd(fix: bool) -> None:
 
 
 cli.add_command(audit_duplicates_cmd, name="reconcile-duplicates")
+
+
+@cli.command("sync-existing")
+@click.option("--dry-run", "--preview", is_flag=True, help="Preview tasks that would be synchronized without making changes.")
+@click.option("--tasks-only", is_flag=True, help="Synchronize eligible tasks to Google Tasks only.")
+@click.option("--calendar-only", is_flag=True, help="Synchronize eligible tasks to Google Calendar only.")
+@click.option("--list-id", default=None, help="Target Google Tasks list ID (defaults to configured default).")
+@click.option("--calendar-id", default=None, help="Target Google Calendar ID (defaults to primary).")
+def sync_existing_cmd(
+    dry_run: bool,
+    tasks_only: bool,
+    calendar_only: bool,
+    list_id: Optional[str],
+    calendar_id: Optional[str],
+) -> None:
+    """Safely backfill and synchronize existing Extern tasks with Google Tasks and Google Calendar."""
+    import sys
+    from rich.table import Table
+    from todo.services.backfill_service import SyncBackfillService
+
+    if tasks_only and calendar_only:
+        console.print("[bold red]Error: Cannot specify both --tasks-only and --calendar-only.[/bold red]\n")
+        sys.exit(1)
+
+    config = Config.load()
+    db = Database(config.db_path)
+    backfill_service = SyncBackfillService(db, config)
+    plan = backfill_service.build_plan(
+        tasks_only=tasks_only,
+        calendar_only=calendar_only,
+        list_id=list_id,
+        calendar_id=calendar_id,
+    )
+
+    console.print("\n[bold bright_white]TASK SYNCHRONIZATION BACKFILL[/bold bright_white]\n")
+    if dry_run:
+        console.print("[bold cyan]Mode: Preview / Dry-run (no database or remote changes will be made)[/bold cyan]\n")
+
+    auth_tasks_str = "[green]Authenticated[/green]" if plan.has_tasks_auth else "[yellow]Not Authenticated[/yellow]"
+    auth_cal_str = "[green]Authorized[/green]" if plan.has_calendar_auth else "[yellow]Not Authorized / Scope Missing[/yellow]"
+    cal_enabled_str = "[green]Enabled[/green]" if plan.calendar_enabled else "[dim]Disabled in config[/dim]"
+
+    console.print(f"  • Google Tasks Status: {auth_tasks_str}")
+    console.print(f"  • Google Calendar Status: {auth_cal_str} ({cal_enabled_str})\n")
+
+    table = Table(title="Task Backfill Plan", show_header=True, header_style="bold cyan")
+    table.add_column("Task ID", style="bold yellow", justify="right")
+    table.add_column("Title", style="white")
+    table.add_column("Source", style="cyan")
+    table.add_column("Status", style="green")
+    table.add_column("Scheduled Date", style="blue")
+    table.add_column("Google Tasks Action", style="magenta")
+    table.add_column("Google Calendar Action", style="magenta")
+
+    for item in plan.items:
+        status_str = "[green]Completed[/green]" if item.completed else "[yellow]Pending[/yellow]"
+        sched_str = item.scheduled_date or "[dim](Unscheduled)[/dim]"
+
+        if item.sync_to_tasks:
+            tasks_act = f"[bold green]→ {item.tasks_target_list}[/bold green]"
+        elif item.tasks_skip_reason in (
+            "already mapped to Google Tasks",
+            "already google_tasks origin",
+            "pending in tasks outbox",
+        ):
+            tasks_act = f"[dim green]✓ {item.tasks_skip_reason}[/dim green]"
+        else:
+            tasks_act = f"[dim red]Skip: {item.tasks_skip_reason}[/dim red]"
+
+        if item.sync_to_calendar:
+            cal_act = f"[bold green]→ {item.calendar_target_id}[/bold green]"
+        elif item.calendar_skip_reason in (
+            "already mapped to Google Calendar",
+            "pending in calendar outbox",
+        ):
+            cal_act = f"[dim green]✓ {item.calendar_skip_reason}[/dim green]"
+        else:
+            cal_act = f"[dim red]Skip: {item.calendar_skip_reason}[/dim red]"
+
+        table.add_row(
+            str(item.task_id),
+            item.title[:40] + ("..." if len(item.title) > 40 else ""),
+            item.source_type,
+            status_str,
+            sched_str,
+            tasks_act,
+            cal_act,
+        )
+
+    console.print(table)
+    console.print()
+
+    console.print(
+        f"[bold bright_white]Summary:[/bold bright_white] "
+        f"Tasks: [bold green]{plan.tasks_to_sync_count} to sync[/bold green], "
+        f"{plan.tasks_already_synced_count} already synced, "
+        f"{plan.tasks_skipped_count} skipped | "
+        f"Calendar: [bold green]{plan.calendar_to_sync_count} to sync[/bold green], "
+        f"{plan.calendar_already_synced_count} already synced, "
+        f"{plan.calendar_skipped_count} skipped\n"
+    )
+
+    if dry_run:
+        console.print("[bold cyan]Dry run completed.[/bold cyan] No database rows were modified and no remote API calls were made.")
+        if plan.tasks_to_sync_count > 0 or plan.calendar_to_sync_count > 0:
+            console.print("Run [bold green]todo sync-existing[/bold green] to execute this synchronization plan.\n")
+        return
+
+    if plan.tasks_to_sync_count == 0 and plan.calendar_to_sync_count == 0:
+        console.print("[bold green]✓ All eligible tasks are already synchronized. Nothing to backfill.[/bold green]\n")
+        return
+
+    if plan.tasks_to_sync_count > 0 and not plan.has_tasks_auth:
+        console.print("[bold red]Error: Google Tasks authentication is required before syncing.[/bold red]")
+        console.print("Run [bold cyan]todo auth[/bold cyan] to connect your Google account.\n")
+        sys.exit(1)
+
+    if plan.calendar_to_sync_count > 0 and not plan.has_calendar_auth:
+        console.print("[bold red]Error: Google Calendar authorization is required before syncing.[/bold red]")
+        console.print("Run [bold cyan]todo auth[/bold cyan] to authorize Calendar access.\n")
+        sys.exit(1)
+
+    console.print("[cyan]Synchronizing eligible tasks...[/cyan]")
+    result = backfill_service.execute_backfill(plan=plan)
+
+    if result.success:
+        console.print("\n[bold green]✓ Backfill synchronization complete![/bold green]")
+        console.print(f"  • Google Tasks: enqueued {result.tasks_enqueued}, synced remotely {result.tasks_drained}")
+        console.print(f"  • Google Calendar: enqueued {result.calendar_enqueued}, synced remotely {result.calendar_drained}\n")
+    else:
+        console.print(f"\n[bold yellow]! Backfill enqueued ({result.tasks_enqueued} tasks, {result.calendar_enqueued} calendar events), but encountered remote errors:[/bold yellow]")
+        for err in result.errors:
+            console.print(f"  [red]• {err}[/red]")
+        console.print("\n[dim]Mutations remain preserved in the offline outbox and will retry automatically.[/dim]\n")
+
+
+cli.add_command(sync_existing_cmd, name="backfill")
 
 
 def main() -> None:
