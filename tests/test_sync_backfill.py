@@ -189,7 +189,7 @@ def test_completed_task_preservation_in_backfill(backfill_env):
         assert row is not None
         payload = json.loads(row["payload"])
         assert payload["status"] == "completed"
-        assert payload["completed"] == "2026-10-21T12:00:00"
+        assert payload["completed"] == "2026-10-21T12:00:00.000Z"
         assert payload["title"] == "Completed Task"
         assert payload["due_date"] == "2026-10-21"
 
@@ -397,4 +397,272 @@ def test_execute_backfill_records_drain_errors(backfill_env):
     result = service.execute_backfill(plan=plan, drain=True)
     assert result.success is False
     assert any("HTTP 500 Internal Error" in e for e in result.errors)
+
+
+# =========================================================================
+# Regression Tests for Google Tasks API HTTP 400 (Invalid argument)
+# =========================================================================
+
+
+def test_format_rfc3339_completion_date_various_formats():
+    """Verify format_rfc3339_completion_date converts raw local and ISO timestamps to RFC 3339 UTC."""
+    from todo.integrations.google_tasks import format_rfc3339_completion_date
+
+    # Naive ISO with microseconds (as stored in SQLite)
+    assert format_rfc3339_completion_date("2026-10-08T23:51:28.260195") == "2026-10-08T23:51:28.260Z"
+
+    # SQL space separated
+    assert format_rfc3339_completion_date("2026-10-08 23:51:28") == "2026-10-08T23:51:28.000Z"
+
+    # Plain date
+    assert format_rfc3339_completion_date("2026-10-08") == "2026-10-08T00:00:00.000Z"
+
+    # Already valid RFC 3339
+    assert format_rfc3339_completion_date("2026-10-08T23:51:28Z") == "2026-10-08T23:51:28.000Z"
+    assert format_rfc3339_completion_date("2026-10-08T23:51:28.123Z") == "2026-10-08T23:51:28.123Z"
+
+    # Timezone offset
+    assert format_rfc3339_completion_date("2026-10-08T23:51:28+00:00") == "2026-10-08T23:51:28.000Z"
+
+    # None and empty
+    assert format_rfc3339_completion_date(None) is None
+    assert format_rfc3339_completion_date("") is None
+    assert format_rfc3339_completion_date("   ") is None
+
+
+def test_client_create_and_update_task_serializes_valid_rfc3339(backfill_env):
+    """Verify GoogleTasksClient.create_task and update_task serialize completion dates as RFC 3339 UTC."""
+    from todo.integrations.google_tasks import GoogleTasksClient
+
+    mgr = backfill_env["tasks_service"].oauth_manager
+    client = GoogleTasksClient(mgr)
+
+    captured_requests = []
+
+    def mock_request(method, endpoint, json_body=None, **kwargs):
+        captured_requests.append({"method": method, "endpoint": endpoint, "json_body": json_body})
+        return {"id": "remote_task_99", "etag": "etag_99"}
+
+    client._request = mock_request
+
+    # Call create_task with raw SQLite timestamp string
+    client.create_task(
+        list_id="@default",
+        title="Test Completed Task",
+        due_date="2026-10-08",
+        status="completed",
+        completed="2026-10-08T23:51:28.260195",
+    )
+
+    assert len(captured_requests) == 1
+    req = captured_requests[0]
+    assert req["method"] == "POST"
+    assert req["json_body"]["status"] == "completed"
+    assert req["json_body"]["completed"] == "2026-10-08T23:51:28.260Z"
+    assert req["json_body"]["due"] == "2026-10-08T00:00:00.000Z"
+
+    # Call update_task with raw SQLite timestamp string
+    client.update_task(
+        list_id="@default",
+        task_id="remote_task_99",
+        status="completed",
+        completed="2026-10-08T23:51:28.260195",
+    )
+
+    assert len(captured_requests) == 2
+    update_req = captured_requests[1]
+    assert update_req["method"] == "PATCH"
+    assert update_req["json_body"]["status"] == "completed"
+    assert update_req["json_body"]["completed"] == "2026-10-08T23:51:28.260Z"
+
+
+def test_create_task_fallback_if_status_completed_rejected(backfill_env):
+    """Verify create_task falls back to create-then-patch if server rejects status=completed on insert with 400."""
+    from todo.integrations.google_tasks import GoogleTasksAPIError, GoogleTasksClient
+
+    mgr = backfill_env["tasks_service"].oauth_manager
+    client = GoogleTasksClient(mgr)
+
+    calls = []
+
+    def mock_request(method, endpoint, json_body=None, **kwargs):
+        calls.append({"method": method, "endpoint": endpoint, "json_body": json_body})
+        if method == "POST" and json_body.get("status") == "completed":
+            # Simulate Google Tasks API rejecting status=completed on POST
+            raise GoogleTasksAPIError("Request contains an invalid argument.", status_code=400)
+        if method == "POST":
+            return {"id": "created_fallback_id", "etag": "etag_1"}
+        if method == "PATCH":
+            return {"id": "created_fallback_id", "status": "completed", "etag": "etag_2"}
+        return {}
+
+    client._request = mock_request
+
+    res = client.create_task(
+        list_id="@default",
+        title="Fallback Task",
+        status="completed",
+        completed="2026-10-08T23:51:28.260195",
+    )
+
+    assert res["id"] == "created_fallback_id"
+    # Should have called:
+    # 1. POST with status=completed (failed with 400)
+    # 2. POST without status=completed (plain create)
+    # 3. PATCH with status=completed and RFC 3339 timestamp
+    assert len(calls) == 3
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["json_body"]["status"] == "completed"
+    assert calls[1]["method"] == "POST"
+    assert "status" not in calls[1]["json_body"]
+    assert calls[2]["method"] == "PATCH"
+    assert calls[2]["json_body"]["status"] == "completed"
+    assert calls[2]["json_body"]["completed"] == "2026-10-08T23:51:28.260Z"
+
+
+def test_drain_outbox_retries_existing_failed_completed_task(backfill_env):
+    """Verify drain_outbox can retry a pre-existing failed outbox entry like Task #7 and resolve it."""
+    db = backfill_env["db"]
+    tasks_service = backfill_env["tasks_service"]
+
+    # Insert a task resembling Task #7: completed, with an existing failed outbox entry
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO tasks (id, title, description, source_type, status, created_at, updated_at)
+            VALUES (7, 'Task 7', '', 'manual', 'completed', '2026-10-08T23:51:22.930553', '2026-10-08T23:51:28.260195')
+            """
+        )
+        cursor.execute(
+            """
+            INSERT INTO daily_tasks (task_id, date, position, completed_at)
+            VALUES (7, '2026-10-08', 1, '2026-10-08T23:51:28.260195')
+            """
+        )
+        cursor.execute(
+            """
+            INSERT INTO task_google_tasks_map (task_id, list_id, remote_id, etag, updated_at)
+            VALUES (7, '@default', 'local_7_1792648432364', '', '2026-10-22T11:23:52')
+            """
+        )
+        # Raw unformatted payload from prior failed run
+        payload = json.dumps({
+            "list_id": "@default",
+            "title": "Task 7",
+            "notes": "",
+            "due_date": "2026-10-08",
+            "local_task_id": 7,
+            "task_id": "local_7_1792648432364",
+            "status": "completed",
+            "completed": "2026-10-08T23:51:28.260195",
+        })
+        cursor.execute(
+            """
+            INSERT INTO google_tasks_outbox (id, task_id, action, payload, created_at, target, retry_count, last_error)
+            VALUES (4, 7, 'create', ?, '2026-10-22T11:23:52', 'tasks', 1, 'Google Tasks API error (400): Request contains an invalid argument.')
+            """,
+            (payload,),
+        )
+        conn.commit()
+
+    captured_create = []
+
+    def mock_create(list_id, title, notes="", due_date=None, status=None, completed=None):
+        captured_create.append({
+            "list_id": list_id,
+            "title": title,
+            "due_date": due_date,
+            "status": status,
+            "completed": completed,
+        })
+        return {"id": "remote_task_7_resolved", "etag": "etag_7_resolved"}
+
+    tasks_service.client.create_task = mock_create
+
+    # Drain outbox
+    processed = tasks_service.drain_outbox()
+    assert processed == 1
+
+    # Verify create_task was called with completed status and timestamp
+    assert len(captured_create) == 1
+    assert captured_create[0]["status"] == "completed"
+    assert captured_create[0]["completed"] == "2026-10-08T23:51:28.260195"
+
+    # Verify outbox item is deleted and mapping is updated with remote ID
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT count(*) as c FROM google_tasks_outbox WHERE id = 4")
+        assert cursor.fetchone()["c"] == 0
+
+        cursor.execute("SELECT remote_id FROM task_google_tasks_map WHERE task_id = 7")
+        row = cursor.fetchone()
+        assert row["remote_id"] == "remote_task_7_resolved"
+
+        # Local task completion and timestamps remain intact
+        cursor.execute("SELECT status FROM tasks WHERE id = 7")
+        assert cursor.fetchone()["status"] == "completed"
+        cursor.execute("SELECT completed_at FROM daily_tasks WHERE task_id = 7")
+        assert cursor.fetchone()["completed_at"] == "2026-10-08T23:51:28.260195"
+
+
+def test_backfill_retries_pending_outbox_items_without_new_enqueues(backfill_env):
+    """Verify execute_backfill drains pending outbox items even when plan.tasks_to_sync_count is 0."""
+    db = backfill_env["db"]
+    service = backfill_env["service"]
+
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO tasks (id, title, description, source_type, status, created_at, updated_at)
+            VALUES (8, 'Pending Outbox Task', '', 'manual', 'completed', '2026-10-08T23:51:22', '2026-10-08T23:51:28')
+            """
+        )
+        cursor.execute(
+            """
+            INSERT INTO task_google_tasks_map (task_id, list_id, remote_id, etag, updated_at)
+            VALUES (8, '@default', 'local_8_12345', '', '2026-10-22T11:23:52')
+            """
+        )
+        payload = json.dumps({
+            "list_id": "@default",
+            "title": "Pending Outbox Task",
+            "local_task_id": 8,
+            "task_id": "local_8_12345",
+            "status": "completed",
+            "completed": "2026-10-08T23:51:28.000Z",
+        })
+        cursor.execute(
+            """
+            INSERT INTO google_tasks_outbox (task_id, action, payload, created_at, target, retry_count)
+            VALUES (8, 'create', ?, '2026-10-22T11:23:52', 'tasks', 1)
+            """,
+            (payload,),
+        )
+        conn.commit()
+
+    plan = service.build_plan()
+    # Task 8 is recognized as pending in outbox, so tasks_to_sync_count is 0
+    assert plan.tasks_to_sync_count == 0
+    assert plan.tasks_pending_outbox_count == 1
+
+    drained_count = [0]
+
+    def mock_drain():
+        drained_count[0] += 1
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM google_tasks_outbox WHERE task_id = 8")
+            conn.commit()
+        return 1
+
+    service.tasks_service.drain_outbox = mock_drain
+
+    result = service.execute_backfill(plan=plan, drain=True)
+    assert result.success is True
+    assert result.tasks_enqueued == 0
+    assert result.tasks_drained == 1
+    assert drained_count[0] == 1
+
 

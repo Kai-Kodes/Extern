@@ -1293,7 +1293,8 @@ class GoogleTasksService:
         if status:
             payload["status"] = status
         if completed:
-            payload["completed"] = completed
+            from todo.integrations.google_tasks import format_rfc3339_completion_date
+            payload["completed"] = format_rfc3339_completion_date(completed) or completed
 
         outbox_id = self.enqueue_outbox(
             action="create",

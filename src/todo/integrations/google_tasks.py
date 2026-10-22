@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.parse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -61,6 +62,39 @@ def parse_rfc3339_due_date(due_str: Optional[str]) -> Optional[str]:
     if not due_str:
         return None
     return due_str[:10]
+
+
+def format_rfc3339_completion_date(completion_str: Optional[str]) -> Optional[str]:
+    """
+    Format a local or ISO completion timestamp string into RFC 3339 UTC format.
+    Google Tasks API requires RFC 3339 format with UTC indicator (e.g. YYYY-MM-DDTHH:MM:SS.sssZ).
+    Accepts:
+      - '2026-10-08T23:51:28.260195' -> '2026-10-08T23:51:28.260Z'
+      - '2026-10-08 23:51:28' -> '2026-10-08T23:51:28.000Z'
+      - '2026-10-08' -> '2026-10-08T00:00:00.000Z'
+      - '2026-10-08T23:51:28Z' -> '2026-10-08T23:51:28.000Z'
+      - '2026-10-08T23:51:28.123Z' -> '2026-10-08T23:51:28.123Z'
+      - '2026-10-08T23:51:28+05:30' -> converted to UTC with Z
+    Returns None if completion_str is None or empty.
+    """
+    if not completion_str or not str(completion_str).strip():
+        return None
+    s = str(completion_str).strip().replace(" ", "T")
+    try:
+        if len(s) == 10 and s[4] == "-" and s[7] == "-":
+            return f"{s}T00:00:00.000Z"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            millis = int(dt.microsecond / 1000)
+            return dt.strftime(f"%Y-%m-%dT%H:%M:%S.{millis:03d}Z")
+        else:
+            utc_dt = dt.astimezone(timezone.utc)
+            millis = int(utc_dt.microsecond / 1000)
+            return utc_dt.strftime(f"%Y-%m-%dT%H:%M:%S.{millis:03d}Z")
+    except Exception:
+        if not s.endswith("Z") and "+" not in s and "-" not in s[10:]:
+            return f"{s}Z"
+        return s
 
 
 @dataclass
@@ -539,8 +573,23 @@ class GoogleTasksClient:
         if status:
             body["status"] = status
             if status == "completed":
-                body["completed"] = completed or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        return self._request("POST", f"/lists/{list_id}/tasks", json_body=body)
+                formatted_comp = format_rfc3339_completion_date(completed)
+                body["completed"] = formatted_comp or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        try:
+            return self._request("POST", f"/lists/{list_id}/tasks", json_body=body)
+        except GoogleTasksAPIError as e:
+            if e.status_code == 400 and body.get("status") == "completed":
+                # Fallback: create as needsAction first, then update with completed status
+                plain_body = {k: v for k, v in body.items() if k not in ("status", "completed")}
+                created = self._request("POST", f"/lists/{list_id}/tasks", json_body=plain_body)
+                if created.get("id"):
+                    return self.update_task(
+                        list_id=list_id,
+                        task_id=created["id"],
+                        status="completed",
+                        completed=completed,
+                    )
+            raise
 
     def update_task(
         self,
@@ -569,7 +618,8 @@ class GoogleTasksClient:
         if status is not None:
             body["status"] = status
             if status == "completed":
-                body["completed"] = completed or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                formatted_comp = format_rfc3339_completion_date(completed)
+                body["completed"] = formatted_comp or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             else:
                 body["completed"] = None
 

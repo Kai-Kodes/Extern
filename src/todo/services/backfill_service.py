@@ -44,6 +44,8 @@ class BackfillPlan:
     has_tasks_auth: bool
     has_calendar_auth: bool
     calendar_enabled: bool
+    tasks_pending_outbox_count: int = 0
+    calendar_pending_outbox_count: int = 0
 
 
 @dataclass
@@ -253,6 +255,13 @@ class SyncBackfillService:
         )
         calendar_skipped = len(items) - calendar_to_sync - calendar_already_synced
 
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT count(*) as c FROM google_tasks_outbox WHERE target = 'tasks' OR target IS NULL")
+            pending_tasks_outbox = cursor.fetchone()["c"]
+            cursor.execute("SELECT count(*) as c FROM google_tasks_outbox WHERE target = 'calendar'")
+            pending_cal_outbox = cursor.fetchone()["c"]
+
         return BackfillPlan(
             items=items,
             tasks_to_sync_count=tasks_to_sync,
@@ -264,6 +273,8 @@ class SyncBackfillService:
             has_tasks_auth=has_tasks_auth,
             has_calendar_auth=has_calendar_auth,
             calendar_enabled=calendar_enabled,
+            tasks_pending_outbox_count=pending_tasks_outbox,
+            calendar_pending_outbox_count=pending_cal_outbox,
         )
 
     def execute_backfill(
@@ -313,7 +324,19 @@ class SyncBackfillService:
                 message="Google Calendar authorization required.",
             )
 
-        if plan.tasks_to_sync_count == 0 and plan.calendar_to_sync_count == 0:
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT count(*) as c FROM google_tasks_outbox WHERE target = 'tasks' OR target IS NULL")
+            pending_tasks_count = cursor.fetchone()["c"]
+            cursor.execute("SELECT count(*) as c FROM google_tasks_outbox WHERE target = 'calendar'")
+            pending_calendar_count = cursor.fetchone()["c"]
+
+        if (
+            plan.tasks_to_sync_count == 0
+            and plan.calendar_to_sync_count == 0
+            and pending_tasks_count == 0
+            and pending_calendar_count == 0
+        ):
             return BackfillResult(
                 success=True,
                 tasks_enqueued=0,
@@ -363,7 +386,9 @@ class SyncBackfillService:
                         if item.completed:
                             payload["status"] = "completed"
                             if item.completed_at:
-                                payload["completed"] = item.completed_at
+                                from todo.integrations.google_tasks import format_rfc3339_completion_date
+                                formatted_comp = format_rfc3339_completion_date(item.completed_at)
+                                payload["completed"] = formatted_comp or item.completed_at
 
                         cursor.execute(
                             """
@@ -403,9 +428,9 @@ class SyncBackfillService:
         tasks_drained = 0
         calendar_drained = 0
         if drain:
-            if tasks_enqueued > 0:
+            if (tasks_enqueued > 0 or pending_tasks_count > 0) and not calendar_only:
                 tasks_drained = self.tasks_service.drain_outbox()
-            if calendar_enqueued > 0:
+            if (calendar_enqueued > 0 or pending_calendar_count > 0) and not tasks_only:
                 calendar_drained = self.calendar_service.drain_outbox()
 
             # Check if any errors occurred during drain

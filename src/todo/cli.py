@@ -455,17 +455,19 @@ def sync_existing_cmd(
         f"{plan.calendar_skipped_count} skipped\n"
     )
 
+    has_pending_outbox = plan.tasks_pending_outbox_count > 0 or plan.calendar_pending_outbox_count > 0
+
     if dry_run:
         console.print("[bold cyan]Dry run completed.[/bold cyan] No database rows were modified and no remote API calls were made.")
-        if plan.tasks_to_sync_count > 0 or plan.calendar_to_sync_count > 0:
+        if plan.tasks_to_sync_count > 0 or plan.calendar_to_sync_count > 0 or has_pending_outbox:
             console.print("Run [bold green]todo sync-existing[/bold green] to execute this synchronization plan.\n")
         return
 
-    if plan.tasks_to_sync_count == 0 and plan.calendar_to_sync_count == 0:
+    if plan.tasks_to_sync_count == 0 and plan.calendar_to_sync_count == 0 and not has_pending_outbox:
         console.print("[bold green]✓ All eligible tasks are already synchronized. Nothing to backfill.[/bold green]\n")
         return
 
-    if plan.tasks_to_sync_count > 0 and not plan.has_tasks_auth:
+    if (plan.tasks_to_sync_count > 0 or plan.tasks_pending_outbox_count > 0) and not calendar_only and not plan.has_tasks_auth:
         console.print("[bold red]Error: Google Tasks authentication is required before syncing.[/bold red]")
         console.print("Run [bold cyan]todo auth[/bold cyan] to connect your Google account.\n")
         sys.exit(1)
@@ -475,8 +477,17 @@ def sync_existing_cmd(
         console.print("Run [bold cyan]todo auth[/bold cyan] to authorize Calendar access.\n")
         sys.exit(1)
 
-    console.print("[cyan]Synchronizing eligible tasks...[/cyan]")
-    result = backfill_service.execute_backfill(plan=plan)
+    if plan.tasks_to_sync_count == 0 and plan.calendar_to_sync_count == 0 and has_pending_outbox:
+        console.print("[cyan]Draining pending / retrying outbox items...[/cyan]")
+    else:
+        console.print("[cyan]Synchronizing eligible tasks...[/cyan]")
+    result = backfill_service.execute_backfill(
+        plan=plan,
+        tasks_only=tasks_only,
+        calendar_only=calendar_only,
+        list_id=list_id,
+        calendar_id=calendar_id,
+    )
 
     if result.success:
         console.print("\n[bold green]✓ Backfill synchronization complete![/bold green]")
