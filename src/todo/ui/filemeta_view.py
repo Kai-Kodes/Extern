@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import Any, List, Optional, Set, Tuple
 
 from rich.table import Table
 from rich.text import Text
@@ -40,7 +40,7 @@ class FilemetaView:
         self.filemeta_adapter = filemeta_adapter
         self.device_manager = device_manager or DeviceManager()
 
-    def run(self) -> Optional[str]:
+    def run(self, select_item_mode: bool = False) -> Any:
         """Main loop for Filemeta sources in full-screen TUI."""
         status_msg: Optional[str] = None
         status_style: str = "red"
@@ -53,7 +53,12 @@ class FilemetaView:
         while True:
             clear_viewport()
             sources = self.source_service.get_sources(source_type="filemeta")
-            subtitle = f"DELETE MODE · {len(selected_source_ids)} selected" if delete_mode else None
+            if delete_mode:
+                subtitle = f"DELETE MODE · {len(selected_source_ids)} selected"
+            elif select_item_mode:
+                subtitle = "Select Source for Chunking"
+            else:
+                subtitle = None
             render_header("FILEMETA SOURCES", subtitle=subtitle)
 
             valid_ids = {s.id for s in sources}
@@ -231,7 +236,11 @@ class FilemetaView:
             if k in ("+", Key.PLUS, "add"):
                 err_msg, res_src = self.handle_add_folder()
                 if res_src:
-                    item_ret = self.handle_source_items(res_src)
+                    item_ret = self.handle_source_items(
+                        res_src, select_item_mode=select_item_mode
+                    )
+                    if select_item_mode and item_ret:
+                        return (res_src, item_ret)
                     if item_ret:
                         return item_ret
                 elif err_msg:
@@ -246,7 +255,11 @@ class FilemetaView:
 
             if (k in (Key.ENTER, "enter")) and active_sources:
                 selected_source = active_sources[selected_idx]
-                item_ret = self.handle_source_items(selected_source)
+                item_ret = self.handle_source_items(
+                    selected_source, select_item_mode=select_item_mode
+                )
+                if select_item_mode and item_ret:
+                    return (selected_source, item_ret)
                 if item_ret:
                     return item_ret
                 continue
@@ -255,7 +268,11 @@ class FilemetaView:
                 idx = int(k)
                 if 1 <= idx <= len(active_sources):
                     selected_source = active_sources[idx - 1]
-                    item_ret = self.handle_source_items(selected_source)
+                    item_ret = self.handle_source_items(
+                        selected_source, select_item_mode=select_item_mode
+                    )
+                    if select_item_mode and item_ret:
+                        return (selected_source, item_ret)
                     if item_ret:
                         return item_ret
                 else:
@@ -805,7 +822,9 @@ class FilemetaView:
 
         return None
 
-    def handle_source_items(self, source: Source) -> Optional[str]:
+    def handle_source_items(
+        self, source: Source, select_item_mode: bool = False
+    ) -> Any:
         """Course details view: displays progress, hierarchical folder navigation, item status, search, and task addition."""
         # Check accessibility once at view entry (fast local check, no reconnect attempt)
         is_accessible = self.device_manager.is_source_accessible(
@@ -866,6 +885,8 @@ class FilemetaView:
                 print_status_message(status_msg, style=status_style)
                 status_msg = None
                 status_style = "red"
+            elif select_item_mode:
+                print_status_message("Select a file to create a Chunky Task", style="bold cyan")
             elif not is_accessible:
                 print_status_message(
                     "Device disconnected · Viewing cached metadata", style="dim yellow"
@@ -1036,6 +1057,13 @@ class FilemetaView:
                     ("Enter", "Done"),
                     ("Esc", "Cancel / Clear"),
                 ]
+            elif select_item_mode:
+                hints = [
+                    ("↑/↓", "Navigate"),
+                    ("Enter", "Select for chunking"),
+                    ("/", "Search"),
+                    ("b", "Back"),
+                ]
             elif selected_item_ids:
                 hints = [
                     ("↑/↓", "Navigate"),
@@ -1200,6 +1228,8 @@ class FilemetaView:
                         continue
                     elif entry_type == "file":
                         target_item = entry_obj
+                        if select_item_mode:
+                            return target_item
                         task = self.task_service.get_or_create_filemeta_task(
                             target_item, source_name=source.name
                         )
@@ -1302,6 +1332,8 @@ class FilemetaView:
                         selected_idx = 0
                         continue
                     elif entry_type == "file":
+                        if select_item_mode:
+                            return entry_obj
                         task = self.task_service.get_or_create_filemeta_task(
                             entry_obj, source_name=source.name
                         )

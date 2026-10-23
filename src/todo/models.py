@@ -140,3 +140,41 @@ class PomodoroStateRecord:
     current_session_index: int = 1
     id: int = 1
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+@dataclass
+class ChunkyResource:
+    source_type: str  # 'youtube', 'telegram', 'filemeta'
+    canonical_uri: str
+    title: str
+    range_unit: str  # 'seconds', 'pages', etc.
+    total_range: float
+    completed_range: float = 0.0
+    is_fully_completed: bool = False
+    fully_completed_at: Optional[str] = None
+    file_item_id: Optional[int] = None
+    id: Optional[int] = None
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    @property
+    def progress_pct(self) -> int:
+        if self.is_fully_completed:
+            return 100
+        if self.total_range <= 0:
+            return 0
+        return int(min(100.0, (self.completed_range / self.total_range) * 100))
+
+
+@dataclass
+class ChunkyTask:
+    resource_id: int
+    task_id: int
+    start_pos: float
+    end_pos: float
+    chunk_index: int = 1
+    is_completed: bool = False
+    completed_at: Optional[str] = None
+    id: Optional[int] = None
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())

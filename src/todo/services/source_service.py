@@ -703,6 +703,12 @@ class SourceService:
 
             conn.commit()
 
+        # Update chunky progress if associated with Chunky Tasks
+        from todo.services.chunky_service import ChunkyService
+        ChunkyService(self.db, date_provider=self.date_provider).on_file_item_completion_changed(
+            item_id, bool(new_completed)
+        )
+
         return self.get_item_by_id(item_id)
 
     def set_item_completion(self, item_id: int, completed: bool) -> None:
@@ -718,6 +724,12 @@ class SourceService:
                 (comp_val, comp_at, now, item_id),
             )
             conn.commit()
+
+        # Update chunky progress if associated with Chunky Tasks
+        from todo.services.chunky_service import ChunkyService
+        ChunkyService(self.db, date_provider=self.date_provider).on_file_item_completion_changed(
+            item_id, completed
+        )
 
     def delete_sources_bulk(self, source_ids: List[int]) -> int:
         """

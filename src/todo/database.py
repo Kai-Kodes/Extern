@@ -159,6 +159,47 @@ CREATE TABLE IF NOT EXISTS google_tasks_outbox (
     last_error TEXT,
     locked_until REAL DEFAULT 0.0
 );
+
+CREATE TABLE IF NOT EXISTS chunky_resources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_item_id INTEGER REFERENCES file_items(id) ON DELETE CASCADE,
+    source_type TEXT NOT NULL,
+    canonical_uri TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    range_unit TEXT NOT NULL,
+    total_range REAL NOT NULL,
+    completed_range REAL NOT NULL DEFAULT 0.0,
+    is_fully_completed INTEGER NOT NULL DEFAULT 0,
+    fully_completed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chunky_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    resource_id INTEGER NOT NULL REFERENCES chunky_resources(id) ON DELETE CASCADE,
+    task_id INTEGER NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL DEFAULT 1,
+    start_pos REAL NOT NULL,
+    end_pos REAL NOT NULL,
+    is_completed INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(resource_id, start_pos, end_pos)
+);
+
+CREATE TABLE IF NOT EXISTS chunky_completion_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chunk_id INTEGER NOT NULL REFERENCES chunky_tasks(id) ON DELETE CASCADE,
+    resource_id INTEGER NOT NULL REFERENCES chunky_resources(id) ON DELETE CASCADE,
+    task_id INTEGER NOT NULL,
+    start_pos REAL NOT NULL,
+    end_pos REAL NOT NULL,
+    completed_at TEXT NOT NULL,
+    action TEXT NOT NULL DEFAULT 'completed',
+    created_at TEXT NOT NULL
+);
 """
 
 INDEXES_SQL = """
@@ -183,6 +224,12 @@ CREATE INDEX IF NOT EXISTS idx_task_gt_map_remote ON task_google_tasks_map(list_
 CREATE INDEX IF NOT EXISTS idx_google_tasks_outbox_created ON google_tasks_outbox(created_at);
 CREATE INDEX IF NOT EXISTS idx_google_tasks_outbox_target ON google_tasks_outbox(target, created_at);
 CREATE INDEX IF NOT EXISTS idx_pomodoro_presets_name ON pomodoro_presets(name);
+CREATE INDEX IF NOT EXISTS idx_chunky_resources_uri ON chunky_resources(canonical_uri);
+CREATE INDEX IF NOT EXISTS idx_chunky_resources_item ON chunky_resources(file_item_id);
+CREATE INDEX IF NOT EXISTS idx_chunky_tasks_resource ON chunky_tasks(resource_id);
+CREATE INDEX IF NOT EXISTS idx_chunky_tasks_task ON chunky_tasks(task_id);
+CREATE INDEX IF NOT EXISTS idx_chunky_history_resource ON chunky_completion_history(resource_id);
+CREATE INDEX IF NOT EXISTS idx_chunky_history_chunk ON chunky_completion_history(chunk_id);
 """
 
 SCHEMA_SQL = TABLES_SQL
@@ -368,6 +415,58 @@ class Database:
                 )
             except sqlite3.IntegrityError:
                 pass
+
+            # Ensure chunky tables exist
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chunky_resources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_item_id INTEGER REFERENCES file_items(id) ON DELETE CASCADE,
+                    source_type TEXT NOT NULL,
+                    canonical_uri TEXT NOT NULL UNIQUE,
+                    title TEXT NOT NULL,
+                    range_unit TEXT NOT NULL,
+                    total_range REAL NOT NULL,
+                    completed_range REAL NOT NULL DEFAULT 0.0,
+                    is_fully_completed INTEGER NOT NULL DEFAULT 0,
+                    fully_completed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chunky_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    resource_id INTEGER NOT NULL REFERENCES chunky_resources(id) ON DELETE CASCADE,
+                    task_id INTEGER NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+                    chunk_index INTEGER NOT NULL DEFAULT 1,
+                    start_pos REAL NOT NULL,
+                    end_pos REAL NOT NULL,
+                    is_completed INTEGER NOT NULL DEFAULT 0,
+                    completed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(resource_id, start_pos, end_pos)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chunky_completion_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chunk_id INTEGER NOT NULL REFERENCES chunky_tasks(id) ON DELETE CASCADE,
+                    resource_id INTEGER NOT NULL REFERENCES chunky_resources(id) ON DELETE CASCADE,
+                    task_id INTEGER NOT NULL,
+                    start_pos REAL NOT NULL,
+                    end_pos REAL NOT NULL,
+                    completed_at TEXT NOT NULL,
+                    action TEXT NOT NULL DEFAULT 'completed',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
 
             # 3. Create all indexes safely now that tables and columns are guaranteed to exist
             conn.executescript(INDEXES_SQL)

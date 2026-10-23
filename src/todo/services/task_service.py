@@ -359,6 +359,11 @@ class TaskService:
                 row["source_id"], status == "completed"
             )
 
+        from todo.services.chunky_service import ChunkyService
+        ChunkyService(self.db, date_provider=self.date_provider).on_task_completion_changed(
+            task_id, status == "completed"
+        )
+
     def delete_tasks_bulk(self, task_ids: List[int]) -> int:
         """
         Delete multiple tasks permanently in a single transaction.

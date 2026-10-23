@@ -27,6 +27,7 @@ class Key:
     PAGE_DOWN = "pagedown"
     PLUS = "+"
     MINUS = "-"
+    SHIFT_PLUS = "shift++"
 
 
 class KeyReader:
@@ -76,6 +77,8 @@ class KeyReader:
             raw = line.strip()
             if line in (" \n", " ") or raw == "space":
                 return Key.SPACE
+            if raw in ("shift++", "shift+", "Shift++", "\x1b[43;2u", "\x1b[43;2~"):
+                return Key.SHIFT_PLUS
             if raw in ("up", "\x1b[A", "\x1bOA"):
                 return Key.UP
             elif raw in ("down", "\x1b[B", "\x1bOB"):
@@ -139,7 +142,7 @@ class KeyReader:
                         return Key.HOME
                     elif ch3 == "F":
                         return Key.END
-                    elif ch3 in ("1", "2", "3", "4", "5", "6"):
+                    elif ch3 in ("1", "2", "3", "5", "6"):
                         # Possible ~ extension, e.g. [3~ for delete, [5~ for pageup
                         r3, _, _ = select.select([fd], [], [], 0.035)
                         if r3:
@@ -152,8 +155,21 @@ class KeyReader:
                             return Key.PAGE_DOWN
                         elif ch3 == "1":
                             return Key.HOME
-                        elif ch3 == "4":
+                    elif ch3 == "4":
+                        # Check if 43;2u / 43;2~ (Shift + +) or 4~ (End)
+                        seq = ch3
+                        while True:
+                            r_seq, _, _ = select.select([fd], [], [], 0.035)
+                            if not r_seq:
+                                break
+                            seq += os.read(fd, 1).decode("utf-8", errors="replace")
+                            if seq.endswith(("~", "u")):
+                                break
+                        if seq in ("43;2u", "43;2~", "43;2"):
+                            return Key.SHIFT_PLUS
+                        elif seq == "4~":
                             return Key.END
+                        return Key.ESCAPE
                     return Key.ESCAPE
                 return Key.ESCAPE
 

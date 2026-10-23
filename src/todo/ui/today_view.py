@@ -73,6 +73,7 @@ class TodayView:
             g_hint = "Google (Auth)" if sync_status and "Auth Needed" in sync_status else "Google"
             hints = [
                 ("+", "Add task"),
+                ("c", "Chunky task"),
                 ("l", "Timeline"),
                 ("u", "Universal tasks"),
                 ("p", "Pomodoro"),
@@ -142,6 +143,7 @@ class TodayView:
                     ("↑/↓", "Navigate"),
                     ("Enter", "Toggle"),
                     ("+", "Add task"),
+                    ("c", "Chunky"),
                     ("e", "Edit"),
                     ("l", "Timeline"),
                     ("d", "Delete"),

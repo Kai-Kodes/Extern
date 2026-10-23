@@ -1,7 +1,7 @@
 """Telegram channels home screen and video lessons browser view for full-screen TUI."""
 
 from datetime import datetime
-from typing import List, Optional, Set, Union
+from typing import Any, List, Optional, Set, Tuple, Union
 
 from rich.table import Table
 from rich.text import Text
@@ -44,7 +44,7 @@ class TelegramView:
         self.task_service = task_service
         self.daily_service = daily_service
 
-    def run(self) -> Optional[str]:
+    def run(self, select_item_mode: bool = False) -> Any:
         """
         Telegram home screen: displays channels already imported into Todo's SQLite database.
         Follows Filemeta workflow: uses SQLite only on launch without network fetching.
@@ -58,7 +58,12 @@ class TelegramView:
         while True:
             clear_viewport()
             sources = self.source_service.get_sources(source_type="telegram")
-            subtitle = f"DELETE MODE · {len(selected_source_ids)} selected" if delete_mode else None
+            if delete_mode:
+                subtitle = f"DELETE MODE · {len(selected_source_ids)} selected"
+            elif select_item_mode:
+                subtitle = "Select Channel for Chunking"
+            else:
+                subtitle = None
             render_header("TELEGRAM CHANNELS", subtitle=subtitle)
 
             valid_ids = {s.id for s in sources}
@@ -226,7 +231,9 @@ class TelegramView:
 
             # +: Open channel picker to discover and import a Telegram channel
             if k in ("+", Key.PLUS, "add"):
-                add_ret = self.handle_add_channel()
+                add_ret = self.handle_add_channel(select_item_mode=select_item_mode)
+                if select_item_mode and add_ret:
+                    return add_ret
                 if add_ret == "added":
                     return "added"
                 continue
@@ -240,7 +247,11 @@ class TelegramView:
             # Enter: Open selected channel lessons immediately from SQLite
             if (k in (Key.ENTER, "enter")) and active_sources:
                 selected_source = active_sources[selected_idx]
-                item_ret = self.handle_channel_lessons(selected_source)
+                item_ret = self.handle_channel_lessons(
+                    selected_source, select_item_mode=select_item_mode
+                )
+                if select_item_mode and item_ret:
+                    return (selected_source, item_ret)
                 if item_ret == "added":
                     return "added"
                 continue
@@ -250,7 +261,11 @@ class TelegramView:
                 idx = int(k)
                 if 1 <= idx <= len(active_sources):
                     selected_source = active_sources[idx - 1]
-                    item_ret = self.handle_channel_lessons(selected_source)
+                    item_ret = self.handle_channel_lessons(
+                        selected_source, select_item_mode=select_item_mode
+                    )
+                    if select_item_mode and item_ret:
+                        return (selected_source, item_ret)
                     if item_ret == "added":
                         return "added"
                 else:
@@ -336,7 +351,7 @@ class TelegramView:
 
         return None
 
-    def handle_add_channel(self) -> Optional[str]:
+    def handle_add_channel(self, select_item_mode: bool = False) -> Any:
         """
         Channel picker: discover, search, and import Telegram channels into Todo.
         Uses locally cached Telegram channels list; refreshes only on explicit 'r'.
@@ -515,7 +530,11 @@ class TelegramView:
 
                 if existing_source:
                     # Open already-imported cached lessons directly without scan!
-                    item_ret = self.handle_channel_lessons(existing_source)
+                    item_ret = self.handle_channel_lessons(
+                        existing_source, select_item_mode=select_item_mode
+                    )
+                    if select_item_mode and item_ret:
+                        return (existing_source, item_ret)
                     return item_ret
                 else:
                     # First-time import!
@@ -536,7 +555,11 @@ class TelegramView:
                             self._show_error_screen("CHANNEL IMPORT FAILED", str(e))
                             return None
 
-                    item_ret = self.handle_channel_lessons(new_source)
+                    item_ret = self.handle_channel_lessons(
+                        new_source, select_item_mode=select_item_mode
+                    )
+                    if select_item_mode and item_ret:
+                        return (new_source, item_ret)
                     return item_ret
 
             # Numeric selection
@@ -548,7 +571,11 @@ class TelegramView:
                     existing_source = self.source_service.get_source_by_path(chan_uri)
 
                     if existing_source:
-                        item_ret = self.handle_channel_lessons(existing_source)
+                        item_ret = self.handle_channel_lessons(
+                            existing_source, select_item_mode=select_item_mode
+                        )
+                        if select_item_mode and item_ret:
+                            return (existing_source, item_ret)
                         return item_ret
                     else:
                         clear_viewport()
@@ -568,14 +595,20 @@ class TelegramView:
                                 self._show_error_screen("CHANNEL IMPORT FAILED", str(e))
                                 return None
 
-                        item_ret = self.handle_channel_lessons(new_source)
+                        item_ret = self.handle_channel_lessons(
+                            new_source, select_item_mode=select_item_mode
+                        )
+                        if select_item_mode and item_ret:
+                            return (new_source, item_ret)
                         return item_ret
                 else:
                     status_msg = f"Invalid selection: #{k}."
 
     def handle_channel_lessons(
-        self, target: Union[Source, TelegramChannel]
-    ) -> Optional[str]:
+        self,
+        target: Union[Source, TelegramChannel],
+        select_item_mode: bool = False,
+    ) -> Any:
         """
         Browse video lessons inside a selected Telegram channel.
         Supports fuzzy search, next unfinished navigation, multi-select, and Today scheduling.
@@ -690,6 +723,8 @@ class TelegramView:
             elif status_msg:
                 print_status_message(status_msg, style="red")
                 status_msg = None
+            elif select_item_mode:
+                print_status_message("Select a lesson to create a Chunky Task", style="bold cyan")
 
             # Filter items if search is active
             if search.is_active:
@@ -787,6 +822,13 @@ class TelegramView:
                     ("↑/↓", "Navigate"),
                     ("Enter", "Done"),
                     ("Esc", "Cancel / Clear"),
+                ]
+            elif select_item_mode:
+                hints = [
+                    ("↑/↓", "Navigate"),
+                    ("Enter", "Select for chunking"),
+                    ("/", "Search"),
+                    ("b", "Back"),
                 ]
             elif selected_item_ids:
                 hints = [
@@ -908,6 +950,9 @@ class TelegramView:
                 if not active_items and not selected_item_ids:
                     continue
 
+                if select_item_mode and active_items:
+                    return active_items[selected_idx]
+
                 if selected_item_ids:
                     items_to_add = [it for it in items if it.id in selected_item_ids]
                 else:
@@ -972,6 +1017,8 @@ class TelegramView:
                 sel_num = int(k)
                 if 1 <= sel_num <= len(active_items):
                     selected_item = active_items[sel_num - 1]
+                    if select_item_mode:
+                        return selected_item
                     task = self.task_service.get_or_create_telegram_task(
                         selected_item, source_name=existing_source.name
                     )

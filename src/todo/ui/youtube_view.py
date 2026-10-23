@@ -1,7 +1,7 @@
 """YouTube library screen and video browser view for full-screen TUI."""
 
 from datetime import datetime
-from typing import List, Optional, Set
+from typing import Any, List, Optional, Set, Tuple
 
 from rich.table import Table
 from rich.text import Text
@@ -46,7 +46,7 @@ class YouTubeView:
         self.task_service = task_service
         self.daily_service = daily_service
 
-    def run(self) -> Optional[str]:
+    def run(self, select_item_mode: bool = False) -> Any:
         """
         YouTube library screen: lists playlists already imported into Todo's SQLite database.
         Uses SQLite only on launch without network fetching.
@@ -60,7 +60,12 @@ class YouTubeView:
         while True:
             clear_viewport()
             sources = self.source_service.get_sources(source_type="youtube")
-            subtitle = f"DELETE MODE · {len(selected_source_ids)} selected" if delete_mode else None
+            if delete_mode:
+                subtitle = f"DELETE MODE · {len(selected_source_ids)} selected"
+            elif select_item_mode:
+                subtitle = "Select Playlist for Chunking"
+            else:
+                subtitle = None
             render_header("YOUTUBE LIBRARY", subtitle=subtitle)
 
             valid_ids = {s.id for s in sources}
@@ -228,7 +233,9 @@ class YouTubeView:
 
             # +: Add video task or import playlist
             if k in ("+", Key.PLUS, "add"):
-                ret = self.handle_add_url()
+                ret = self.handle_add_url(select_item_mode=select_item_mode)
+                if select_item_mode and ret:
+                    return ret
                 if ret == "added":
                     return "added"
                 continue
@@ -243,12 +250,16 @@ class YouTubeView:
             if k in (Key.ENTER, "enter"):
                 if active_sources:
                     selected_source = active_sources[selected_idx]
-                    item_ret = self.handle_playlist_videos(selected_source)
+                    item_ret = self.handle_playlist_videos(selected_source, select_item_mode=select_item_mode)
+                    if select_item_mode and item_ret:
+                        return (selected_source, item_ret)
                     if item_ret == "added":
                         return "added"
                     continue
                 elif not search.is_active and not search.query:
-                    ret = self.handle_add_url()
+                    ret = self.handle_add_url(select_item_mode=select_item_mode)
+                    if select_item_mode and ret:
+                        return ret
                     if ret == "added":
                         return "added"
                     continue
@@ -258,13 +269,15 @@ class YouTubeView:
                 idx = int(k)
                 if 1 <= idx <= len(active_sources):
                     selected_source = active_sources[idx - 1]
-                    item_ret = self.handle_playlist_videos(selected_source)
+                    item_ret = self.handle_playlist_videos(selected_source, select_item_mode=select_item_mode)
+                    if select_item_mode and item_ret:
+                        return (selected_source, item_ret)
                     if item_ret == "added":
                         return "added"
                 else:
                     status_msg = f"Invalid selection: #{k}."
 
-    def handle_add_url(self) -> Optional[str]:
+    def handle_add_url(self, select_item_mode: bool = False) -> Any:
         """
         Input screen: paste a single video URL or playlist URL.
         - Single video URL creates a task in SQLite with the actual YouTube title and adds to Today.
@@ -303,6 +316,35 @@ class YouTubeView:
                 except Exception as e:
                     return self._show_error_screen("VIDEO FETCH ERROR", str(e))
 
+            if select_item_mode:
+                scanned_item = ScannedFile(
+                    name=video.video_id,
+                    path=video.path,
+                    title=video.title,
+                    type="video",
+                    metadata={
+                        "source_type": "youtube",
+                        "video_id": video.video_id,
+                        "duration": video.duration,
+                        "duration_formatted": video.duration_formatted,
+                        "canonical_url": video.canonical_url,
+                        "channel": video.channel,
+                        "uploader": video.uploader,
+                    },
+                )
+                scan_res = FilemetaScanResult(
+                    source_name="Single Videos",
+                    source_path="youtube://videos",
+                    items=[scanned_item],
+                )
+                single_source, _, _ = self.source_service.add_or_update_source(scan_res)
+                items = self.source_service.get_items_by_source(single_source.id)
+                file_item = next(
+                    (it for it in items if it.name == video.video_id),
+                    items[0] if items else None,
+                )
+                return (single_source, file_item)
+
             # Create or reuse task (deduplicating by canonical URL)
             task, _ = self.task_service.get_or_create_video_task(
                 title=video.title,
@@ -327,7 +369,12 @@ class YouTubeView:
 
             if existing:
                 # Reopen existing cached contents immediately without full scan
-                return self.handle_playlist_videos(existing)
+                item_ret = self.handle_playlist_videos(
+                    existing, select_item_mode=select_item_mode
+                )
+                if select_item_mode and item_ret:
+                    return (existing, item_ret)
+                return item_ret
 
             # First-time import
             with console.status(
@@ -372,9 +419,16 @@ class YouTubeView:
             new_source, _, _ = self.source_service.add_or_update_source(scan_res)
 
             # Open the playlist's video browser immediately
-            return self.handle_playlist_videos(new_source)
+            item_ret = self.handle_playlist_videos(
+                new_source, select_item_mode=select_item_mode
+            )
+            if select_item_mode and item_ret:
+                return (new_source, item_ret)
+            return item_ret
 
-    def handle_playlist_videos(self, source: Source) -> Optional[str]:
+    def handle_playlist_videos(
+        self, source: Source, select_item_mode: bool = False
+    ) -> Any:
         """
         Video browser view for an imported YouTube playlist.
         Supports navigation, live fuzzy search (/), next unfinished (n),
@@ -437,6 +491,8 @@ class YouTubeView:
             elif status_msg:
                 print_status_message(status_msg, style="red")
                 status_msg = None
+            elif select_item_mode:
+                print_status_message("Select a video to create a Chunky Task", style="bold cyan")
 
             # Filter items if search is active
             if search.is_active:
@@ -534,6 +590,13 @@ class YouTubeView:
                     ("↑/↓", "Navigate"),
                     ("Enter", "Done"),
                     ("Esc", "Cancel / Clear"),
+                ]
+            elif select_item_mode:
+                hints = [
+                    ("↑/↓", "Navigate"),
+                    ("Enter", "Select for chunking"),
+                    ("/", "Search"),
+                    ("b", "Back"),
                 ]
             elif selected_item_ids:
                 hints = [
@@ -655,6 +718,9 @@ class YouTubeView:
                 if not active_items and not selected_item_ids:
                     continue
 
+                if select_item_mode and active_items:
+                    return active_items[selected_idx]
+
                 if selected_item_ids:
                     items_to_add = [it for it in items if it.id in selected_item_ids]
                 else:
@@ -708,6 +774,8 @@ class YouTubeView:
                 sel_num = int(k)
                 if 1 <= sel_num <= len(active_items):
                     selected_item = active_items[sel_num - 1]
+                    if select_item_mode:
+                        return selected_item
                     task = self.task_service.get_or_create_youtube_task(
                         selected_item, source_name=current_source.name
                     )

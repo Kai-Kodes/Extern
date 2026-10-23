@@ -318,6 +318,10 @@ class DailyService:
             from todo.services.source_service import SourceService
             SourceService(self.db, date_provider=self.date_provider).set_item_completion(source_id, is_completed)
 
+        # Notify chunky_service of chunk task completion
+        from todo.services.chunky_service import ChunkyService
+        ChunkyService(self.db, date_provider=self.date_provider).on_task_completion_changed(task_id, is_completed)
+
         # Propagate completion to Google Tasks or outbox
         if source_type == "google_tasks" and source_id:
             self._sync_google_task_completion(task_id, source_id, is_completed)

@@ -21,6 +21,8 @@ from todo.services.pomodoro_timer import PomodoroTimer
 from todo.services.source_service import SourceService
 from todo.services.task_service import TaskService
 from todo.ui.add_task_view import AddTaskView
+from todo.services.chunky_service import ChunkyService
+from todo.ui.chunky_view import ChunkyTaskView
 from todo.ui.console import (
     clear_viewport,
     console,
@@ -88,6 +90,15 @@ class TodoApp:
             self.source_service,
             self.task_service,
             self.daily_service,
+        )
+        self.chunky_service = ChunkyService(self.db, date_provider=self.date_provider)
+        self.chunky_view = ChunkyTaskView(
+            chunky_service=self.chunky_service,
+            filemeta_view=self.filemeta_view,
+            youtube_view=self.youtube_view,
+            telegram_view=self.telegram_view,
+            task_service=self.task_service,
+            daily_service=self.daily_service,
         )
         self.google_tasks_service = GoogleTasksService(
             db=self.db,
@@ -359,6 +370,10 @@ class TodoApp:
 
                     if choice in ("+", Key.PLUS, "add"):
                         self.handle_add_task_menu()
+                        continue
+
+                    if choice in ("c", "C", "chunky", Key.SHIFT_PLUS, "shift++"):
+                        self.chunky_view.run()
                         continue
 
                     if choice.lower() in ("u", "universal"):
