@@ -4,7 +4,9 @@ import pytest
 
 from todo.services.chunky_service import (
     calculate_coverage,
+    format_human_duration,
     format_range,
+    format_remaining,
     merge_intervals,
     propose_next_chunk,
     seconds_to_hms,
@@ -118,3 +120,70 @@ def test_format_hms_and_ranges():
     assert format_range("seconds", 1200, 2400) == "00:20:00–00:40:00"
     assert format_range("pages", 1, 10) == "p. 1–10"
     assert format_range("pages", 11, 20) == "p. 11–20"
+
+
+def test_format_human_duration_46m40s_example():
+    """Verify the 46m 40s video example from product specifications:
+    - Total duration: 46m 40s (2800s)
+    - Completed: 20m (1200s)
+    - Remaining: 26m 40s (1600s)
+    - Next chunk: 20m (1200s), covering 20:00–40:00
+    - Final chunk: 6m 40s (400s), covering 40:00–46:40
+    """
+    total = 2800.0
+    completed = 1200.0
+    remaining = total - completed
+    next_chunk = 1200.0
+    final_chunk = 400.0
+
+    assert format_human_duration(total) == "46m 40s"
+    assert format_human_duration(completed) == "20m"
+    assert format_human_duration(remaining) == "26m 40s"
+    assert format_human_duration(next_chunk) == "20m"
+    assert format_human_duration(final_chunk) == "6m 40s"
+
+
+def test_format_human_duration_whole_and_partial_minutes():
+    # Whole minutes
+    assert format_human_duration(60) == "1m"
+    assert format_human_duration(300) == "5m"
+    assert format_human_duration(900) == "15m"
+    assert format_human_duration(1200) == "20m"
+    assert format_human_duration(1800) == "30m"
+    assert format_human_duration(2700) == "45m"
+    assert format_human_duration(3600) == "1h"
+    assert format_human_duration(5400) == "1h 30m"
+    assert format_human_duration(7200) == "2h"
+
+    # Partial minutes
+    assert format_human_duration(45) == "45s"
+    assert format_human_duration(90) == "1m 30s"
+    assert format_human_duration(3665) == "1h 1m 5s"
+    assert format_human_duration(7245) == "2h 45s"
+
+
+def test_format_human_duration_zero_and_precision():
+    # Zero remaining duration
+    assert format_human_duration(0) == "0s"
+    assert format_human_duration(0.0) == "0s"
+    assert format_human_duration(-10) == "0s"
+
+    # Float rounding precision
+    assert format_human_duration(2799.999) == "46m 40s"
+    assert format_human_duration(1199.9) == "20m"
+    assert format_human_duration(0.0001) == "0s"
+
+
+def test_format_remaining_units():
+    # Media duration (seconds)
+    assert format_remaining("seconds", 2800) == "46m 40s"
+    assert format_remaining("seconds", 1600) == "26m 40s"
+    assert format_remaining("seconds", 1200) == "20m"
+    assert format_remaining("seconds", 0) == "0s"
+
+    # Document pages
+    assert format_remaining("pages", 750) == "750 pages"
+    assert format_remaining("pages", 1) == "1 page"
+    assert format_remaining("pages", 0) == "0 pages"
+    assert format_remaining("pages", 15.0) == "15 pages"
+

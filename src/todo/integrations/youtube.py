@@ -171,8 +171,15 @@ class YouTubePlaylist:
 class YouTubeAdapter:
     """Adapter for extracting YouTube video and playlist metadata using yt-dlp."""
 
-    def __init__(self, yt_dlp_command: str = "yt-dlp"):
+    DEFAULT_FORMAT_SELECTOR = "b/bv*+ba/b/best/all"
+
+    def __init__(
+        self,
+        yt_dlp_command: str = "yt-dlp",
+        format_selector: Optional[str] = DEFAULT_FORMAT_SELECTOR,
+    ):
         self.yt_dlp_command = yt_dlp_command
+        self.format_selector = format_selector
 
     def _check_binary(self) -> None:
         if not shutil.which(self.yt_dlp_command):
@@ -197,8 +204,10 @@ class YouTubeAdapter:
             "--no-warnings",
             "--ignore-errors",
             "--no-playlist",
-            canonical_url,
         ]
+        if self.format_selector:
+            cmd.extend(["-f", self.format_selector])
+        cmd.append(canonical_url)
 
         try:
             proc = subprocess.run(
@@ -269,8 +278,10 @@ class YouTubeAdapter:
             "--skip-download",
             "--no-warnings",
             "--ignore-errors",
-            canonical_url,
         ]
+        if self.format_selector:
+            cmd.extend(["-f", self.format_selector])
+        cmd.append(canonical_url)
 
         try:
             proc = subprocess.run(

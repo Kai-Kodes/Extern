@@ -185,6 +185,8 @@ def test_youtube_adapter_fetch_single_video_success():
             assert "--no-playlist" in args
             assert "--dump-json" in args
             assert "--skip-download" in args
+            assert "-f" in args
+            assert "b/bv*+ba/b/best/all" in args
 
 
 def test_youtube_adapter_fetch_single_video_error():
@@ -952,3 +954,444 @@ def test_youtube_add_task_menu_opens_library_with_cached_playlists():
         items = app.source_service.get_items_by_source(sources[0].id)
         assert len(items) == 1
         assert items[0].title == "Ex 1"
+
+
+# ============================================================================
+# PART 8: Regression Tests - Robust Format Handling & Loading State Lifecycle
+# ============================================================================
+
+
+def test_regression_metadata_only_extraction_options():
+    """
+    1. Metadata-only extraction succeeds without downloading media,
+    passing format fallback selector and skip-download flags.
+    """
+    adapter = YouTubeAdapter("yt-dlp")
+    mock_json = json.dumps({
+        "id": "abc_meta",
+        "title": "Systems Programming Lecture",
+        "duration": 3600,
+        "channel": "UniCourse",
+        "webpage_url": "https://www.youtube.com/watch?v=abc_meta",
+    })
+
+    with patch("shutil.which", return_value="/usr/bin/yt-dlp"):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=mock_json + "\n", stderr="")
+            video = adapter.fetch_single_video("https://www.youtube.com/watch?v=abc_meta")
+            assert video.video_id == "abc_meta"
+            assert video.duration == 3600
+
+            args = mock_run.call_args[0][0]
+            assert "--dump-json" in args
+            assert "--skip-download" in args
+            assert "-f" in args
+            assert "b/bv*+ba/b/best/all" in args
+
+        # Playlist extraction also passes format fallback without download
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=mock_json + "\n", stderr="")
+            pl = adapter.fetch_playlist("https://www.youtube.com/playlist?list=PL_TEST_FORMAT")
+            assert pl.playlist_id == "PL_TEST_FORMAT"
+            args_pl = mock_run.call_args[0][0]
+            assert "--dump-json" in args_pl
+            assert "--skip-download" in args_pl
+            assert "-f" in args_pl
+            assert "b/bv*+ba/b/best/all" in args_pl
+
+
+def test_regression_format_selection_failure_reported():
+    """
+    2. Format-selection failure from yt-dlp is reported correctly as YouTubeFetchError.
+    """
+    adapter = YouTubeAdapter("yt-dlp")
+    stderr_err = "ERROR: [youtube] WLYjl-cLbKU: Requested format is not available. Use --list-formats for a list of available formats"
+    with patch("shutil.which", return_value="/usr/bin/yt-dlp"):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr=stderr_err)
+            with pytest.raises(YouTubeFetchError) as exc_info:
+                adapter.fetch_single_video("https://www.youtube.com/watch?v=WLYjl-cLbKU")
+            assert "Requested format is not available" in str(exc_info.value)
+
+
+def test_regression_loading_state_clears_on_extraction_error(services):
+    """
+    3. The loading state clears after an extraction error BEFORE displaying the error screen.
+    Ensures console.status is inactive while _show_error_screen is rendered.
+    """
+    task_service, source_service, daily_service = services
+    mock_adapter = MagicMock()
+    mock_adapter.fetch_single_video.side_effect = YouTubeFetchError(
+        "Requested format is not available. Use --list-formats for a list of available formats"
+    )
+
+    view = YouTubeView(mock_adapter, source_service, task_service, daily_service)
+
+    status_was_active_during_error_screen = None
+
+    def spy_show_error_screen(title, msg):
+        nonlocal status_was_active_during_error_screen
+        import todo.ui.youtube_view
+        live = getattr(todo.ui.youtube_view.console, "_live", None)
+        status_was_active_during_error_screen = (live is not None and getattr(live, "is_started", False))
+        assert title == "VIDEO FETCH FAILED"
+        assert "Requested format is not available" in msg
+        return None
+
+    with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="https://youtu.be/WLYjl-cLbKU"):
+        with patch.object(view, "_show_error_screen", side_effect=spy_show_error_screen) as mock_err:
+            res = view.handle_add_url()
+            assert res is None
+            mock_err.assert_called_once()
+            assert status_was_active_during_error_screen is False
+
+
+def test_regression_loading_state_clears_on_successful_extraction(services):
+    """
+    4. The loading state clears after successful extraction.
+    """
+    task_service, source_service, daily_service = services
+    mock_adapter = MagicMock()
+    mock_adapter.fetch_single_video.return_value = YouTubeVideo(
+        video_id="success_vid",
+        title="Valid Tutorial",
+        canonical_url="https://www.youtube.com/watch?v=success_vid",
+        path="youtube://video/success_vid",
+        duration=120,
+        duration_formatted="02:00",
+    )
+
+    view = YouTubeView(mock_adapter, source_service, task_service, daily_service)
+
+    import todo.ui.youtube_view
+    with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="https://www.youtube.com/watch?v=success_vid"):
+        res = view.handle_add_url()
+        assert res == "added"
+        live = getattr(todo.ui.youtube_view.console, "_live", None)
+        assert live is None or not getattr(live, "is_started", False)
+
+
+def test_regression_return_to_previous_menu_cleans_viewport(services):
+    """
+    5. Returning to the previous menu does not leave a stale status line or error residue.
+    """
+    task_service, source_service, daily_service = services
+    mock_adapter = MagicMock()
+    view = YouTubeView(mock_adapter, source_service, task_service, daily_service)
+
+    # A) Cancel at URL prompt
+    with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="b"):
+        res = view.handle_add_url()
+        assert res is None
+
+    # B) Dismiss error screen with 'b' clears viewport
+    with patch("todo.ui.youtube_view.clear_viewport") as mock_clear:
+        with patch("todo.ui.youtube_view.key_reader.read_key", return_value="b"):
+            ret = view._show_error_screen("TEST ERROR", "Some error description")
+            assert ret is None
+            assert mock_clear.call_count >= 2
+
+
+def test_regression_subsequent_fetch_starts_normally_after_failure(services):
+    """
+    6. A subsequent fetch can start normally after a failure without stale state.
+    """
+    task_service, source_service, daily_service = services
+    mock_adapter = MagicMock()
+
+    mock_adapter.fetch_single_video.side_effect = [
+        YouTubeFetchError("First attempt failed"),
+        YouTubeVideo(
+            video_id="recovered_vid",
+            title="Recovered Tutorial",
+            canonical_url="https://www.youtube.com/watch?v=recovered_vid",
+            path="youtube://video/recovered_vid",
+            duration=300,
+            duration_formatted="05:00",
+        ),
+    ]
+
+    view = YouTubeView(mock_adapter, source_service, task_service, daily_service)
+
+    # 1. First attempt fails
+    with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="https://youtu.be/fail1"):
+        with patch.object(view, "_show_error_screen", return_value=None):
+            res1 = view.handle_add_url()
+            assert res1 is None
+
+    # 2. Second attempt succeeds immediately
+    with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="https://youtu.be/recovered_vid"):
+        res2 = view.handle_add_url()
+        assert res2 == "added"
+
+    # Verify task in Today
+    today_str = daily_service.get_today_str()
+    tasks = daily_service.get_tasks_for_date(today_str)
+    assert any(t.task.title == "Recovered Tutorial" for t in tasks)
+
+
+def test_regression_playlist_import_and_caching_intact(services):
+    """
+    7. Playlist importing and existing YouTube caching behavior remain intact.
+    """
+    task_service, source_service, daily_service = services
+    mock_adapter = MagicMock()
+    mock_adapter.fetch_playlist.return_value = YouTubePlaylist(
+        playlist_id="PL_CACHE_CHECK",
+        title="Distributed Algorithms",
+        canonical_url="https://www.youtube.com/playlist?list=PL_CACHE_CHECK",
+        source_path="youtube://playlist/PL_CACHE_CHECK",
+        items=[
+            YouTubeVideo(video_id="da1", title="Paxos", canonical_url="https://www.youtube.com/watch?v=da1", path="youtube://video/da1"),
+            YouTubeVideo(video_id="da2", title="Raft", canonical_url="https://www.youtube.com/watch?v=da2", path="youtube://video/da2"),
+        ],
+        video_count=2,
+    )
+
+    view = YouTubeView(mock_adapter, source_service, task_service, daily_service)
+
+    # 1. First import
+    with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="https://www.youtube.com/playlist?list=PL_CACHE_CHECK"):
+        with patch.object(view, "handle_playlist_videos", return_value=None):
+            view.handle_add_url()
+            assert mock_adapter.fetch_playlist.call_count == 1
+
+    # 2. Re-open cached playlist -> zero network calls
+    with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="https://www.youtube.com/playlist?list=PL_CACHE_CHECK"):
+        with patch.object(view, "handle_playlist_videos", return_value=None):
+            view.handle_add_url()
+            assert mock_adapter.fetch_playlist.call_count == 1
+
+
+# ============================================================================
+# PART 9: Regression Tests - Chunky Tasks YouTube Resource Selection Fix
+# ============================================================================
+
+
+def test_chunky_tasks_youtube_import_selects_file_item_without_attribute_error(services):
+    """
+    1. Single video import in select_item_mode=True returns (single_source, file_item)
+    without raising AttributeError: 'FileItem' object has no attribute 'name'.
+    """
+    task_service, source_service, daily_service = services
+    mock_adapter = MagicMock()
+    mock_adapter.fetch_single_video.return_value = YouTubeVideo(
+        video_id="chunk_vid_1",
+        title="Chunky Test Video 1",
+        canonical_url="https://www.youtube.com/watch?v=chunk_vid_1",
+        path="youtube://video/chunk_vid_1",
+        duration=1800,
+        duration_formatted="30:00",
+    )
+
+    view = YouTubeView(mock_adapter, source_service, task_service, daily_service)
+
+    with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="https://www.youtube.com/watch?v=chunk_vid_1"):
+        result = view.handle_add_url(select_item_mode=True)
+
+    assert result is not None
+    source, item = result
+    assert source.name == "Single Videos"
+    assert source.path == "youtube://videos"
+    assert isinstance(item, FileItem)
+    assert item.title == "Chunky Test Video 1"
+    assert item.path == "youtube://video/chunk_vid_1"
+    assert item.metadata.get("video_id") == "chunk_vid_1"
+    assert item.metadata.get("duration") == 1800
+
+
+def test_chunky_tasks_youtube_import_selects_correct_item_when_multiple_exist(services):
+    """
+    2. Pre-populate 'Single Videos' source with multiple items and verify that
+    the correct item matching video.video_id is returned, not items[0].
+    """
+    task_service, source_service, daily_service = services
+
+    # Pre-populate 'Single Videos' source with 2 items
+    scan_res = FilemetaScanResult(
+        source_name="Single Videos",
+        source_path="youtube://videos",
+        items=[
+            ScannedFile(
+                name="first_vid",
+                path="youtube://video/first_vid",
+                title="First Video in List",
+                type="video",
+                metadata={"video_id": "first_vid", "source_type": "youtube"},
+            ),
+            ScannedFile(
+                name="second_vid",
+                path="youtube://video/second_vid",
+                title="Second Video in List",
+                type="video",
+                metadata={"video_id": "second_vid", "source_type": "youtube"},
+            ),
+        ],
+    )
+    source_service.add_or_update_source(scan_res)
+
+    mock_adapter = MagicMock()
+    mock_adapter.fetch_single_video.return_value = YouTubeVideo(
+        video_id="third_target_vid",
+        title="Target Video To Chunk",
+        canonical_url="https://www.youtube.com/watch?v=third_target_vid",
+        path="youtube://video/third_target_vid",
+        duration=2400,
+        duration_formatted="40:00",
+    )
+
+    view = YouTubeView(mock_adapter, source_service, task_service, daily_service)
+
+    with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="https://www.youtube.com/watch?v=third_target_vid"):
+        result = view.handle_add_url(select_item_mode=True)
+
+    assert result is not None
+    source, item = result
+    assert isinstance(item, FileItem)
+    assert item.metadata.get("video_id") == "third_target_vid"
+    assert item.title == "Target Video To Chunk"
+    # Ensure it did NOT fall back to items[0]
+    assert item.metadata.get("video_id") != "first_vid"
+    assert item.title != "First Video in List"
+
+    # Also test selecting existing second_vid
+    mock_adapter.fetch_single_video.return_value = YouTubeVideo(
+        video_id="second_vid",
+        title="Second Video in List",
+        canonical_url="https://www.youtube.com/watch?v=second_vid",
+        path="youtube://video/second_vid",
+        duration=1200,
+        duration_formatted="20:00",
+    )
+    with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="https://www.youtube.com/watch?v=second_vid"):
+        result2 = view.handle_add_url(select_item_mode=True)
+
+    assert result2 is not None
+    source2, item2 = result2
+    assert item2.metadata.get("video_id") == "second_vid"
+    assert item2.title == "Second Video in List"
+    assert item2.metadata.get("video_id") != "first_vid"
+
+
+def test_chunky_tasks_youtube_import_missing_matching_item_handled_safely(services):
+    """
+    3. If get_items_by_source does not contain the expected video item,
+    _show_error_screen is displayed with 'VIDEO SELECTION FAILED' and returns None.
+    """
+    task_service, source_service, daily_service = services
+    mock_adapter = MagicMock()
+    mock_adapter.fetch_single_video.return_value = YouTubeVideo(
+        video_id="nonexistent_vid",
+        title="Nonexistent Vid",
+        canonical_url="https://www.youtube.com/watch?v=nonexistent_vid",
+        path="youtube://video/nonexistent_vid",
+    )
+
+    view = YouTubeView(mock_adapter, source_service, task_service, daily_service)
+
+    unrelated_item = FileItem(
+        id=999,
+        source_id=1,
+        path="youtube://video/unrelated_vid",
+        title="Unrelated Video",
+        type="video",
+        completed=False,
+        metadata={"video_id": "unrelated_vid"},
+    )
+
+    with patch.object(source_service, "get_items_by_source", return_value=[unrelated_item]):
+        with patch.object(view, "_show_error_screen", return_value=None) as mock_error:
+            with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="https://www.youtube.com/watch?v=nonexistent_vid"):
+                res = view.handle_add_url(select_item_mode=True)
+
+    assert res is None
+    mock_error.assert_called_once()
+    assert mock_error.call_args[0][0] == "VIDEO SELECTION FAILED"
+    assert "nonexistent_vid" in mock_error.call_args[0][1]
+
+
+def test_chunky_tasks_youtube_import_empty_items_handled_safely(services):
+    """
+    4. If get_items_by_source returns an empty list,
+    _show_error_screen is displayed with 'VIDEO SELECTION FAILED' without crashing.
+    """
+    task_service, source_service, daily_service = services
+    mock_adapter = MagicMock()
+    mock_adapter.fetch_single_video.return_value = YouTubeVideo(
+        video_id="empty_list_vid",
+        title="Empty List Vid",
+        canonical_url="https://www.youtube.com/watch?v=empty_list_vid",
+        path="youtube://video/empty_list_vid",
+    )
+
+    view = YouTubeView(mock_adapter, source_service, task_service, daily_service)
+
+    with patch.object(source_service, "get_items_by_source", return_value=[]):
+        with patch.object(view, "_show_error_screen", return_value=None) as mock_error:
+            with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="https://www.youtube.com/watch?v=empty_list_vid"):
+                res = view.handle_add_url(select_item_mode=True)
+
+    assert res is None
+    mock_error.assert_called_once()
+    assert mock_error.call_args[0][0] == "VIDEO SELECTION FAILED"
+    assert "empty_list_vid" in mock_error.call_args[0][1]
+
+
+def test_normal_youtube_import_and_playlist_caching_intact(services):
+    """
+    5. Normal select_item_mode=False creates a task and adds to Today,
+    while select_item_mode=True inside playlist browser returns (source, item),
+    and cached playlists perform zero network calls.
+    """
+    task_service, source_service, daily_service = services
+    mock_adapter = MagicMock()
+    mock_adapter.fetch_single_video.return_value = YouTubeVideo(
+        video_id="normal_vid",
+        title="Normal Standalone Video",
+        canonical_url="https://www.youtube.com/watch?v=normal_vid",
+        path="youtube://video/normal_vid",
+        duration=300,
+        duration_formatted="05:00",
+    )
+    mock_adapter.fetch_playlist.return_value = YouTubePlaylist(
+        playlist_id="PL_CHUNKY_PL",
+        title="Chunky Playlist Course",
+        canonical_url="https://www.youtube.com/playlist?list=PL_CHUNKY_PL",
+        source_path="youtube://playlist/PL_CHUNKY_PL",
+        items=[
+            YouTubeVideo(video_id="pl_vid_1", title="Episode 1", canonical_url="https://www.youtube.com/watch?v=pl_vid_1", path="youtube://video/pl_vid_1", duration=600, duration_formatted="10:00"),
+            YouTubeVideo(video_id="pl_vid_2", title="Episode 2", canonical_url="https://www.youtube.com/watch?v=pl_vid_2", path="youtube://video/pl_vid_2", duration=900, duration_formatted="15:00"),
+        ],
+        video_count=2,
+    )
+
+    view = YouTubeView(mock_adapter, source_service, task_service, daily_service)
+
+    # A) Normal import (select_item_mode=False) creates task in Today
+    with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="https://www.youtube.com/watch?v=normal_vid"):
+        res = view.handle_add_url(select_item_mode=False)
+        assert res == "added"
+        today_tasks = daily_service.get_tasks_for_date(daily_service.get_today_str())
+        assert any(t.task.title == "Normal Standalone Video" for t in today_tasks)
+
+    # B) Playlist in select_item_mode=True: User selects item via Enter
+    # Key sequence: Down to item 1 (Episode 2), Enter to select for chunking
+    keys = [Key.DOWN, Key.ENTER]
+    with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="https://www.youtube.com/playlist?list=PL_CHUNKY_PL"):
+        with patch("todo.ui.youtube_view.key_reader.read_key", side_effect=keys):
+            pl_result = view.handle_add_url(select_item_mode=True)
+
+    assert pl_result is not None
+    pl_source, pl_item = pl_result
+    assert pl_source.name == "Chunky Playlist Course"
+    assert pl_item.title == "Episode 2"
+    assert pl_item.metadata.get("video_id") == "pl_vid_2"
+    assert mock_adapter.fetch_playlist.call_count == 1
+
+    # C) Re-opening cached playlist does NOT call fetch_playlist again
+    keys_cached = ["b"]
+    with patch("todo.ui.youtube_view.key_reader.read_text_input", return_value="https://www.youtube.com/playlist?list=PL_CHUNKY_PL"):
+        with patch("todo.ui.youtube_view.key_reader.read_key", side_effect=keys_cached):
+            view.handle_add_url(select_item_mode=True)
+            assert mock_adapter.fetch_playlist.call_count == 1
+

@@ -352,17 +352,23 @@ class TaskService:
             )
             conn.commit()
 
-        if row and row["source_type"] in ("filemeta", "telegram", "youtube", "google_tasks") and row["source_id"]:
+        from todo.services.chunky_service import ChunkyService
+        chunky_svc = ChunkyService(self.db, date_provider=self.date_provider)
+        is_chunk = chunky_svc.is_chunk_task(task_id)
+
+        # Two-way sync: if originated from a FileItem, update its completed state
+        # ONLY for whole-item tasks, NEVER for individual chunk tasks
+        if not is_chunk and row and row["source_type"] in ("filemeta", "telegram", "youtube", "google_tasks") and row["source_id"]:
             from todo.services.source_service import SourceService
 
             SourceService(self.db, date_provider=self.date_provider).set_item_completion(
                 row["source_id"], status == "completed"
             )
 
-        from todo.services.chunky_service import ChunkyService
-        ChunkyService(self.db, date_provider=self.date_provider).on_task_completion_changed(
-            task_id, status == "completed"
-        )
+        if is_chunk:
+            chunky_svc.on_task_completion_changed(
+                task_id, status == "completed"
+            )
 
     def delete_tasks_bulk(self, task_ids: List[int]) -> int:
         """

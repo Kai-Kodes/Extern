@@ -10,7 +10,9 @@ from todo.models import ChunkyResource, ChunkyTask, FileItem, Source
 from todo.services.chunky_service import (
     ChunkyService,
     calculate_coverage,
+    format_human_duration,
     format_range,
+    format_remaining,
     propose_next_chunk,
 )
 from todo.services.daily_service import DailyService
@@ -212,14 +214,30 @@ class ChunkyTaskView:
                 ("6", "Custom page count...", -1.0),
             ]
 
+        remaining = max(0.0, resource.total_range - covered)
+
         while True:
             clear_viewport()
             render_header("CHUNKY TASK", subtitle="Select Chunk Size")
-            console.print(f"Resource:  [bold white]{resource.title}[/bold white]")
-            console.print(f"Length:    [dim]{format_range(range_unit, 0, resource.total_range)}[/dim]")
-            console.print(
-                f"Progress:  [cyan]{pct}%[/cyan] [dim]({covered:.0f}/{resource.total_range:.0f} {range_unit})[/dim]\n"
-            )
+            console.print(f"Resource:   [bold white]{resource.title}[/bold white]")
+            if range_unit == "seconds":
+                console.print(
+                    f"Total:      [dim]{format_human_duration(resource.total_range)} ({format_range(range_unit, 0, resource.total_range)})[/dim]"
+                )
+                console.print(
+                    f"Completed:  [green]{format_human_duration(covered)}[/green] [dim]({pct}%)[/dim]"
+                )
+                console.print(
+                    f"Remaining:  [bold cyan]{format_human_duration(remaining)}[/bold cyan]\n"
+                )
+            else:
+                total_int = int(round(resource.total_range))
+                covered_int = int(round(covered))
+                rem_int = int(round(remaining))
+                console.print(f"Total:      [dim]{total_int} pages[/dim]")
+                console.print(f"Completed:  [green]{covered_int} pages[/green] [dim]({pct}%)[/dim]")
+                console.print(f"Remaining:  [bold cyan]{rem_int} pages[/bold cyan]\n")
+
             console.print("Choose chunk size:\n")
 
             for key_str, label, val in presets:
@@ -265,9 +283,14 @@ class ChunkyTaskView:
             )
 
             if not proposed:
+                size_label = (
+                    format_human_duration(chunk_size)
+                    if range_unit == "seconds"
+                    else f"{int(chunk_size)} pages"
+                )
                 self._show_info_screen(
                     "NO CHUNK AVAILABLE",
-                    f"No uncompleted range remaining for chunk size {chunk_size:.0f} {range_unit}.\n"
+                    f"No uncompleted range remaining for chunk size {size_label}.\n"
                     "Resource coverage is complete.",
                 )
                 return None
@@ -283,6 +306,8 @@ class ChunkyTaskView:
                 formatted_range=formatted_range,
                 task_title=task_title,
                 today_str=today_str,
+                start_pos=start_pos,
+                end_pos=end_pos,
             )
 
             if preview_action == "confirm":
@@ -338,6 +363,8 @@ class ChunkyTaskView:
         formatted_range: str,
         task_title: str,
         today_str: str,
+        start_pos: Optional[float] = None,
+        end_pos: Optional[float] = None,
     ) -> str:
         """Display chunky task preview screen and await confirmation."""
         clear_viewport()
@@ -345,7 +372,22 @@ class ChunkyTaskView:
         console.print(f"Resource:       [bold white]{resource.title}[/bold white]")
         console.print(f"Source:         [dim]{resource.source_type.capitalize()}[/dim]")
         console.print(f"Progress:       [cyan]{pct}% complete[/cyan]")
-        console.print(f"Proposed Chunk: [bold green]{formatted_range}[/bold green]")
+
+        if start_pos is not None and end_pos is not None:
+            chunk_len = max(0.0, end_pos - start_pos)
+            if resource.range_unit == "seconds":
+                chunk_size_str = format_human_duration(chunk_len)
+                console.print(
+                    f"Proposed Chunk: [bold green]{chunk_size_str}[/bold green] [dim]({formatted_range})[/dim]"
+                )
+            else:
+                chunk_size_str = f"{int(round(chunk_len))} pages"
+                console.print(
+                    f"Proposed Chunk: [bold green]{chunk_size_str}[/bold green] [dim]({formatted_range})[/dim]"
+                )
+        else:
+            console.print(f"Proposed Chunk: [bold green]{formatted_range}[/bold green]")
+
         console.print(f"Task Title:     [bold white]{task_title}[/bold white]")
         console.print(f"Scheduled For:  [bold cyan]Today ({today_str})[/bold cyan]\n")
 

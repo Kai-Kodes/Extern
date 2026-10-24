@@ -303,18 +303,27 @@ class YouTubeView:
             # ------------------------------------------------------------------
             # SINGLE VIDEO URL: Fetch metadata, create Task, add to Today
             # ------------------------------------------------------------------
-            with console.status(
-                "[bold cyan]Fetching YouTube video metadata...[/bold cyan]",
-                spinner="dots",
-            ):
-                try:
+            video: Optional[YouTubeVideo] = None
+            err_screen: Optional[Tuple[str, str]] = None
+
+            try:
+                with console.status(
+                    "[bold cyan]Fetching YouTube video metadata...[/bold cyan]",
+                    spinner="dots",
+                ):
                     video = self.adapter.fetch_single_video(url_input)
-                except YouTubeNotFoundError as e:
-                    return self._show_error_screen("YT-DLP NOT FOUND", str(e))
-                except YouTubeError as e:
-                    return self._show_error_screen("VIDEO FETCH FAILED", str(e))
-                except Exception as e:
-                    return self._show_error_screen("VIDEO FETCH ERROR", str(e))
+            except YouTubeNotFoundError as e:
+                err_screen = ("YT-DLP NOT FOUND", str(e))
+            except YouTubeError as e:
+                err_screen = ("VIDEO FETCH FAILED", str(e))
+            except Exception as e:
+                err_screen = ("VIDEO FETCH ERROR", str(e))
+
+            if err_screen:
+                return self._show_error_screen(err_screen[0], err_screen[1])
+
+            if not video:
+                return None
 
             if select_item_mode:
                 scanned_item = ScannedFile(
@@ -340,9 +349,22 @@ class YouTubeView:
                 single_source, _, _ = self.source_service.add_or_update_source(scan_res)
                 items = self.source_service.get_items_by_source(single_source.id)
                 file_item = next(
-                    (it for it in items if it.name == video.video_id),
-                    items[0] if items else None,
+                    (
+                        it
+                        for it in items
+                        if (
+                            it.metadata.get("video_id") == video.video_id
+                            or it.path == video.path
+                            or it.relative_path == video.video_id
+                        )
+                    ),
+                    None,
                 )
+                if not file_item:
+                    return self._show_error_screen(
+                        "VIDEO SELECTION FAILED",
+                        f"Could not locate imported file item for video ID '{video.video_id}'.",
+                    )
                 return (single_source, file_item)
 
             # Create or reuse task (deduplicating by canonical URL)
@@ -377,18 +399,27 @@ class YouTubeView:
                 return item_ret
 
             # First-time import
-            with console.status(
-                "[bold cyan]Importing YouTube playlist metadata...[/bold cyan]",
-                spinner="dots",
-            ):
-                try:
+            playlist: Optional[YouTubePlaylist] = None
+            err_screen: Optional[Tuple[str, str]] = None
+
+            try:
+                with console.status(
+                    "[bold cyan]Importing YouTube playlist metadata...[/bold cyan]",
+                    spinner="dots",
+                ):
                     playlist = self.adapter.fetch_playlist(url_input)
-                except YouTubeNotFoundError as e:
-                    return self._show_error_screen("YT-DLP NOT FOUND", str(e))
-                except YouTubeError as e:
-                    return self._show_error_screen("PLAYLIST IMPORT FAILED", str(e))
-                except Exception as e:
-                    return self._show_error_screen("PLAYLIST IMPORT ERROR", str(e))
+            except YouTubeNotFoundError as e:
+                err_screen = ("YT-DLP NOT FOUND", str(e))
+            except YouTubeError as e:
+                err_screen = ("PLAYLIST IMPORT FAILED", str(e))
+            except Exception as e:
+                err_screen = ("PLAYLIST IMPORT ERROR", str(e))
+
+            if err_screen:
+                return self._show_error_screen(err_screen[0], err_screen[1])
+
+            if not playlist:
+                return None
 
             # Store in SQLite
             items = [
@@ -790,14 +821,19 @@ class YouTubeView:
         playlist_id = source.path.replace("youtube://playlist/", "")
         canonical_url = f"https://www.youtube.com/playlist?list={playlist_id}"
 
-        with console.status(
-            f"[bold cyan]Rescanning playlist {source.name}...[/bold cyan]",
-            spinner="dots",
-        ):
-            try:
+        playlist = None
+        err_msg = None
+        try:
+            with console.status(
+                f"[bold cyan]Rescanning playlist {source.name}...[/bold cyan]",
+                spinner="dots",
+            ):
                 playlist = self.adapter.fetch_playlist(canonical_url)
-            except Exception as e:
-                return source, f"Rescan failed: {e}"
+        except Exception as e:
+            err_msg = f"Rescan failed: {e}"
+
+        if err_msg or not playlist:
+            return source, err_msg
 
         items = [
             ScannedFile(
@@ -908,4 +944,5 @@ class YouTubeView:
             k = key_reader.read_key()
             if k in (Key.ESCAPE, "b", "q", "cancel"):
                 break
+        clear_viewport()
         return None

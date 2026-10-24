@@ -313,14 +313,20 @@ class DailyService:
             )
             conn.commit()
 
+        # Check if this task is a chunky task
+        from todo.services.chunky_service import ChunkyService
+        chunky_svc = ChunkyService(self.db, date_provider=self.date_provider)
+        is_chunk = chunky_svc.is_chunk_task(task_id)
+
         # Two-way sync: if originated from a FileItem, update its completed state
-        if source_type in ("filemeta", "telegram", "youtube", "google_tasks") and source_id:
+        # ONLY for whole-item tasks, NEVER for individual chunk tasks
+        if not is_chunk and source_type in ("filemeta", "telegram", "youtube", "google_tasks") and source_id:
             from todo.services.source_service import SourceService
             SourceService(self.db, date_provider=self.date_provider).set_item_completion(source_id, is_completed)
 
         # Notify chunky_service of chunk task completion
-        from todo.services.chunky_service import ChunkyService
-        ChunkyService(self.db, date_provider=self.date_provider).on_task_completion_changed(task_id, is_completed)
+        if is_chunk:
+            chunky_svc.on_task_completion_changed(task_id, is_completed)
 
         # Propagate completion to Google Tasks or outbox
         if source_type == "google_tasks" and source_id:

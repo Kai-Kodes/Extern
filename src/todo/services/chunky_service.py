@@ -26,6 +26,61 @@ def seconds_to_hms(seconds: float | int) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def format_human_duration(seconds: float | int) -> str:
+    """
+    Format numeric seconds into a human-friendly duration string.
+    Preserves exact integer seconds without floating-point artifacts.
+
+    Examples:
+        0 -> '0s'
+        45 -> '45s'
+        1200 -> '20m'
+        400 -> '6m 40s'
+        1600 -> '26m 40s'
+        2800 -> '46m 40s'
+        3600 -> '1h'
+        5400 -> '1h 30m'
+        7245 -> '2h 45s'
+    """
+    try:
+        total = max(0, int(round(float(seconds))))
+    except (ValueError, TypeError):
+        return "0s"
+
+    if total == 0:
+        return "0s"
+
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+
+    parts: List[str] = []
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0:
+        parts.append(f"{minutes}m")
+    if secs > 0:
+        parts.append(f"{secs}s")
+
+    return " ".join(parts) if parts else "0s"
+
+
+def format_remaining(unit: str, amount: float | int) -> str:
+    """
+    Format remaining quantity based on the resource's natural unit.
+    For 'seconds', formats into human-friendly minutes/seconds ('26m 40s').
+    For 'pages', formats as integer pages ('750 pages').
+    """
+    if unit == "seconds":
+        return format_human_duration(amount)
+    elif unit == "pages":
+        amt = max(0, int(round(float(amount))))
+        return f"{amt} page" if amt == 1 else f"{amt} pages"
+    else:
+        amt = max(0, int(round(float(amount))))
+        return f"{amt} {unit}"
+
+
 def format_range(unit: str, start: float | int, end: float | int) -> str:
     """Format a range into a human-friendly string based on its natural unit."""
     if unit == "seconds":
@@ -372,6 +427,13 @@ class ChunkyService:
             for r in rows
         ]
 
+    def is_chunk_task(self, task_id: int) -> bool:
+        """Check if a task_id corresponds to an existing chunky task."""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM chunky_tasks WHERE task_id = ?", (task_id,))
+            return cursor.fetchone() is not None
+
     def create_chunk_task(
         self,
         resource: ChunkyResource,
@@ -520,14 +582,15 @@ class ChunkyService:
                 (chunk_id, resource_id, task_id, start_pos, end_pos, now, action, now),
             )
 
-            # 3. Recalculate resource progress from scratch
+            # 3. Recalculate resource progress from scratch based on actual completed chunk intervals
             cursor.execute(
-                "SELECT total_range, is_fully_completed, file_item_id FROM chunky_resources WHERE id = ?",
+                "SELECT total_range, is_fully_completed, fully_completed_at, file_item_id FROM chunky_resources WHERE id = ?",
                 (resource_id,),
             )
             res_row = cursor.fetchone()
             total_range = res_row["total_range"] if res_row else 0.0
             is_full = bool(res_row["is_fully_completed"]) if res_row else False
+            existing_fully_at = res_row["fully_completed_at"] if res_row else None
             fi_id = res_row["file_item_id"] if res_row else None
 
             cursor.execute(
@@ -536,17 +599,20 @@ class ChunkyService:
             )
             comp_ranges = [(r["start_pos"], r["end_pos"]) for r in cursor.fetchall()]
 
-            covered, pct = calculate_coverage(comp_ranges, total_range, is_fully_completed=is_full)
+            # Calculate actual interval coverage of completed chunks (never assume 100% full override on chunk toggle)
+            covered, pct = calculate_coverage(comp_ranges, total_range, is_fully_completed=False)
 
-            # If all intervals are complete, mark resource fully completed
-            new_is_full = 1 if is_full or (covered >= total_range and total_range > 0) else 0
-            fully_at = now if new_is_full and not is_full else None
+            # If all intervals are complete (accounting for float precision), mark resource fully completed
+            # Otherwise, resource remains incomplete (< 100%)
+            is_covered_100 = (total_range > 0 and covered >= total_range - 1e-6)
+            new_is_full = 1 if is_covered_100 else 0
+            fully_at = (existing_fully_at or now) if new_is_full else None
 
             cursor.execute(
                 """
                 UPDATE chunky_resources
                 SET completed_range = ?, is_fully_completed = ?,
-                    fully_completed_at = COALESCE(fully_completed_at, ?), updated_at = ?
+                    fully_completed_at = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (covered, new_is_full, fully_at, now, resource_id),
@@ -558,8 +624,8 @@ class ChunkyService:
                     "UPDATE file_items SET completed = 1, completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE id = ?",
                     (now, now, fi_id),
                 )
-            elif not new_is_full and fi_id and not is_completed and prev_completed:
-                # If chunk was reopened and resource was completed by coverage, reopen file_item
+            elif not new_is_full and fi_id:
+                # If resource is not 100% complete, ensure parent file_item is reopened if it was marked completed
                 cursor.execute(
                     "UPDATE file_items SET completed = 0, completed_at = NULL, updated_at = ? WHERE id = ?",
                     (now, fi_id),
