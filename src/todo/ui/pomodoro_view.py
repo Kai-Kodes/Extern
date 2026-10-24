@@ -11,6 +11,7 @@ from rich.text import Text
 
 from todo.models import PomodoroPreset, PomodoroSessionPhase, PomodoroTimerState
 from todo.services.audio_service import AudioService
+from todo.services.chunky_service import format_human_duration
 from todo.services.pomodoro_service import PomodoroService
 from todo.services.pomodoro_timer import PomodoroTimer
 from todo.ui.console import (
@@ -352,9 +353,9 @@ class PomodoroView:
                 table.add_row(
                     cursor,
                     p.name,
-                    f"{p.work_duration}m",
-                    f"{p.short_break_duration}m",
-                    f"{p.long_break_duration}m",
+                    format_human_duration(p.work_duration * 60),
+                    format_human_duration(p.short_break_duration * 60),
+                    format_human_duration(p.long_break_duration * 60),
                     f"Every {p.sessions_before_long_break}",
                     auto_str,
                     sound_str,
@@ -468,15 +469,15 @@ class PomodoroView:
             if name:
                 preset.name = name
 
-            work_str = prompt_input(f"Work duration [{preset.work_duration}m]: ").strip()
+            work_str = prompt_input(f"Work duration [{format_human_duration(preset.work_duration * 60)}]: ").strip()
             if work_str:
                 preset.work_duration = int(work_str)
 
-            sbreak_str = prompt_input(f"Short break [{preset.short_break_duration}m]: ").strip()
+            sbreak_str = prompt_input(f"Short break [{format_human_duration(preset.short_break_duration * 60)}]: ").strip()
             if sbreak_str:
                 preset.short_break_duration = int(sbreak_str)
 
-            lbreak_str = prompt_input(f"Long break [{preset.long_break_duration}m]: ").strip()
+            lbreak_str = prompt_input(f"Long break [{format_human_duration(preset.long_break_duration * 60)}]: ").strip()
             if lbreak_str:
                 preset.long_break_duration = int(lbreak_str)
 

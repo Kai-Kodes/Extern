@@ -155,11 +155,11 @@ def test_format_human_duration_whole_and_partial_minutes():
     assert format_human_duration(5400) == "1h 30m"
     assert format_human_duration(7200) == "2h"
 
-    # Partial minutes
+    # Partial minutes (< 60 minutes includes seconds, >= 60 minutes includes hours and minutes)
     assert format_human_duration(45) == "45s"
     assert format_human_duration(90) == "1m 30s"
-    assert format_human_duration(3665) == "1h 1m 5s"
-    assert format_human_duration(7245) == "2h 45s"
+    assert format_human_duration(3665) == "1h 1m"
+    assert format_human_duration(7245) == "2h"
 
 
 def test_format_human_duration_zero_and_precision():
@@ -172,6 +172,74 @@ def test_format_human_duration_zero_and_precision():
     assert format_human_duration(2799.999) == "46m 40s"
     assert format_human_duration(1199.9) == "20m"
     assert format_human_duration(0.0001) == "0s"
+
+
+def test_format_human_duration_standardized_policy():
+    """Verify standardized duration policy:
+    - Less than 60 seconds: seconds, e.g. 45s
+    - Less than 60 minutes: minutes and remaining seconds, e.g. 26m 40s
+    - At least 60 minutes: hours and remaining minutes, e.g. 1h 18m
+    - Exact hours: omit zero-valued smaller units, e.g. 2h
+    - Durations above 24 hours remain expressed in hours, e.g. 36h 20m, 168h
+    - Zero duration: 0s
+    - No accidental rounding up to 1h when below 60m
+    """
+    # Zero and sub-minute durations
+    assert format_human_duration(0) == "0s"
+    assert format_human_duration(0.0) == "0s"
+    assert format_human_duration(-10) == "0s"
+    assert format_human_duration(0.0001) == "0s"
+    assert format_human_duration(1) == "1s"
+    assert format_human_duration(45) == "45s"
+    assert format_human_duration(59) == "59s"
+
+    # Exactly 59 minutes, 59 minutes 59 seconds, and exactly 60 minutes
+    assert format_human_duration(3540) == "59m"
+    assert format_human_duration(3599) == "59m 59s"
+    assert format_human_duration(3600) == "1h"
+
+    # 78 minutes displaying as 1h 18m
+    assert format_human_duration(78 * 60) == "1h 18m"
+
+    # Exact hours and durations with remaining minutes
+    assert format_human_duration(3600) == "1h"
+    assert format_human_duration(7200) == "2h"
+    assert format_human_duration(5400) == "1h 30m"
+    assert format_human_duration(3665) == "1h 1m"
+    assert format_human_duration(7245) == "2h"
+    assert format_human_duration(23 * 3600 + 59 * 60) == "23h 59m"
+
+    # 24 hours, 36 hours, and 168 hours staying in hour notation (never days/weeks)
+    assert format_human_duration(24 * 3600) == "24h"
+    assert format_human_duration(36 * 3600) == "36h"
+    assert format_human_duration(36 * 3600 + 20 * 60) == "36h 20m"
+    assert format_human_duration(168 * 3600) == "168h"
+    assert format_human_duration(168 * 3600 + 45 * 60) == "168h 45m"
+
+    # Floating-point durations and boundary rounding
+    assert format_human_duration(2799.999) == "46m 40s"
+    assert format_human_duration(1199.9) == "20m"
+    assert format_human_duration(3599.4) == "59m 59s"
+    assert format_human_duration(3599.9) == "59m 59s"  # Protected from rounding to 1h
+    assert format_human_duration(3600.0) == "1h"
+    assert format_human_duration(3600.4) == "1h"
+    assert format_human_duration(4680.2) == "1h 18m"
+
+
+def test_exact_interval_timestamps_and_pages_unchanged():
+    # Exact media interval timestamps formatted as HH:MM:SS
+    assert seconds_to_hms(0) == "00:00:00"
+    assert seconds_to_hms(1200) == "00:20:00"
+    assert seconds_to_hms(2400) == "00:40:00"
+    assert seconds_to_hms(2800) == "00:46:40"
+    assert seconds_to_hms(86400) == "24:00:00"
+    assert seconds_to_hms(130800) == "36:20:00"
+    assert format_range("seconds", 1200, 2400) == "00:20:00–00:40:00"
+    assert format_range("seconds", 2400, 2800) == "00:40:00–00:46:40"
+
+    # Existing page-based displays remaining unchanged
+    assert format_range("pages", 1, 10) == "p. 1–10"
+    assert format_range("pages", 11, 20) == "p. 11–20"
 
 
 def test_format_remaining_units():

@@ -29,41 +29,52 @@ def seconds_to_hms(seconds: float | int) -> str:
 
 def format_human_duration(seconds: float | int) -> str:
     """
-    Format numeric seconds into a human-friendly duration string.
-    Preserves exact integer seconds without floating-point artifacts.
+    Format numeric seconds into a standardized, human-friendly duration string.
 
-    Examples:
-        0 -> '0s'
-        45 -> '45s'
-        1200 -> '20m'
-        400 -> '6m 40s'
-        1600 -> '26m 40s'
-        2800 -> '46m 40s'
-        3600 -> '1h'
-        5400 -> '1h 30m'
-        7245 -> '2h 45s'
+    Policy:
+    - Less than 60 seconds: display seconds, e.g. '45s'.
+    - Less than 60 minutes: display minutes and remaining seconds, e.g. '26m 40s'.
+    - At least 60 minutes: display hours and remaining minutes, e.g. '1h 18m'.
+    - Exact hours: omit zero-valued smaller units, e.g. '2h'.
+    - Durations above 24 hours remain expressed in hours, e.g. '36h 20m', never '1d 12h'.
+    - Zero or negative duration: '0s'.
+    - Avoid unnecessary decimal places and floating-point noise in display strings.
+    - Never accidentally round a duration below 60 minutes up to '1h' to preserve
+      meaningful remaining time.
     """
     try:
-        total = max(0, int(round(float(seconds))))
+        val = float(seconds)
     except (ValueError, TypeError):
         return "0s"
 
-    if total == 0:
+    if not math.isfinite(val) or val <= 0:
         return "0s"
 
+    rounded_secs = int(round(val))
+    if rounded_secs == 0:
+        return "0s"
+
+    # Durations strictly under 60 minutes (< 3600 seconds)
+    # Guaranteed never to display as '1h', even at 3599.9s
+    if val < 3600:
+        total = min(3599, rounded_secs)
+        if total < 60:
+            return f"{total}s"
+        minutes = total // 60
+        secs = total % 60
+        if secs > 0:
+            return f"{minutes}m {secs}s"
+        return f"{minutes}m"
+
+    # Durations at least 60 minutes (>= 3600 seconds)
+    total = rounded_secs
     hours = total // 3600
-    minutes = (total % 3600) // 60
-    secs = total % 60
+    rem_secs = total % 3600
+    minutes = rem_secs // 60
 
-    parts: List[str] = []
-    if hours > 0:
-        parts.append(f"{hours}h")
     if minutes > 0:
-        parts.append(f"{minutes}m")
-    if secs > 0:
-        parts.append(f"{secs}s")
-
-    return " ".join(parts) if parts else "0s"
+        return f"{hours}h {minutes}m"
+    return f"{hours}h"
 
 
 def format_remaining(unit: str, amount: float | int) -> str:
