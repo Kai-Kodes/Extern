@@ -200,6 +200,18 @@ CREATE TABLE IF NOT EXISTS chunky_completion_history (
     action TEXT NOT NULL DEFAULT 'completed',
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS chunky_presets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL COLLATE NOCASE,
+    duration REAL NOT NULL,
+    range_unit TEXT NOT NULL DEFAULT 'seconds',
+    is_default INTEGER NOT NULL DEFAULT 0,
+    is_builtin INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(range_unit, name)
+);
 """
 
 INDEXES_SQL = """
@@ -230,6 +242,7 @@ CREATE INDEX IF NOT EXISTS idx_chunky_tasks_resource ON chunky_tasks(resource_id
 CREATE INDEX IF NOT EXISTS idx_chunky_tasks_task ON chunky_tasks(task_id);
 CREATE INDEX IF NOT EXISTS idx_chunky_history_resource ON chunky_completion_history(resource_id);
 CREATE INDEX IF NOT EXISTS idx_chunky_history_chunk ON chunky_completion_history(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_chunky_presets_unit ON chunky_presets(range_unit);
 """
 
 SCHEMA_SQL = TABLES_SQL
@@ -467,6 +480,21 @@ class Database:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chunky_presets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL COLLATE NOCASE,
+                    duration REAL NOT NULL,
+                    range_unit TEXT NOT NULL DEFAULT 'seconds',
+                    is_default INTEGER NOT NULL DEFAULT 0,
+                    is_builtin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(range_unit, name)
+                )
+                """
+            )
 
             # 3. Create all indexes safely now that tables and columns are guaranteed to exist
             conn.executescript(INDEXES_SQL)
@@ -487,6 +515,49 @@ class Database:
                     """,
                     ("Classic", 25, 5, 15, 4, 0, 1, now_iso, now_iso),
                 )
+
+            # 5. Seed default Chunky presets if none exist
+            cursor.execute("SELECT count(*) as count FROM chunky_presets WHERE range_unit = 'seconds'")
+            if cursor.fetchone()["count"] == 0:
+                from datetime import datetime
+                now_iso = datetime.now().isoformat()
+                default_seconds = [
+                    ("15 minutes", 900.0, 0, 1),
+                    ("20 minutes", 1200.0, 1, 1),
+                    ("30 minutes", 1800.0, 0, 1),
+                    ("45 minutes", 2700.0, 0, 1),
+                    ("60 minutes", 3600.0, 0, 1),
+                ]
+                for name, dur, is_def, is_built in default_seconds:
+                    cursor.execute(
+                        """
+                        INSERT OR IGNORE INTO chunky_presets (
+                            name, duration, range_unit, is_default, is_builtin, created_at, updated_at
+                        ) VALUES (?, ?, 'seconds', ?, ?, ?, ?)
+                        """,
+                        (name, dur, is_def, is_built, now_iso, now_iso),
+                    )
+
+            cursor.execute("SELECT count(*) as count FROM chunky_presets WHERE range_unit = 'pages'")
+            if cursor.fetchone()["count"] == 0:
+                from datetime import datetime
+                now_iso = datetime.now().isoformat()
+                default_pages = [
+                    ("5 pages", 5.0, 0, 1),
+                    ("10 pages", 10.0, 1, 1),
+                    ("15 pages", 15.0, 0, 1),
+                    ("20 pages", 20.0, 0, 1),
+                    ("25 pages", 25.0, 0, 1),
+                ]
+                for name, dur, is_def, is_built in default_pages:
+                    cursor.execute(
+                        """
+                        INSERT OR IGNORE INTO chunky_presets (
+                            name, duration, range_unit, is_default, is_builtin, created_at, updated_at
+                        ) VALUES (?, ?, 'pages', ?, ?, ?, ?)
+                        """,
+                        (name, dur, is_def, is_built, now_iso, now_iso),
+                    )
 
             conn.commit()
 

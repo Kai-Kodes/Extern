@@ -1,11 +1,12 @@
 """Service for managing Chunky Tasks, range intervals, progress tracking, and resource completion."""
 
 from datetime import datetime
+import math
 import sqlite3
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from todo.database import Database
-from todo.models import ChunkyResource, ChunkyTask, FileItem, Task
+from todo.models import ChunkyPreset, ChunkyResource, ChunkyTask, FileItem, Task
 
 
 # =============================================================================
@@ -196,6 +197,48 @@ def propose_next_chunk(
     return None
 
 
+def get_remaining_intervals(
+    completed_intervals: List[Tuple[float, float]],
+    total_range: float,
+) -> List[Tuple[float, float]]:
+    """
+    Return all disjoint uncompleted intervals within [0, total_range].
+    """
+    if total_range <= 0.0:
+        return []
+    merged = merge_intervals(completed_intervals, total_range=total_range)
+    gaps: List[Tuple[float, float]] = []
+    cursor = 0.0
+    for s, e in merged:
+        if cursor < s:
+            gaps.append((cursor, s))
+        cursor = max(cursor, e)
+    if cursor < total_range:
+        gaps.append((cursor, total_range))
+    return gaps
+
+
+def propose_entire_remaining_chunk(
+    completed_intervals: List[Tuple[float, float]],
+    total_range: float,
+    is_fully_completed: bool = False,
+) -> Optional[Tuple[float, float]]:
+    """
+    Propose the next uncompleted chunk covering the entire uncompleted extent
+    of the earliest remaining gap.
+    Safely respects interval boundaries so it never bridges across already-completed intervals.
+    Returns None if resource is 100% completed or total_range <= 0.
+    """
+    if is_fully_completed or total_range <= 0.0:
+        return None
+    return propose_next_chunk(
+        completed_intervals=completed_intervals,
+        total_range=total_range,
+        chunk_size=total_range,
+        is_fully_completed=is_fully_completed,
+    )
+
+
 # =============================================================================
 # ChunkyService
 # =============================================================================
@@ -212,6 +255,311 @@ class ChunkyService:
 
     def get_now(self) -> datetime:
         return self.date_provider() if self.date_provider else datetime.now()
+
+    def validate_preset(self, preset: ChunkyPreset) -> None:
+        """Validate preset fields, raising ValueError with clear message if invalid."""
+        if not preset.name or not str(preset.name).strip():
+            raise ValueError("Preset name cannot be empty.")
+        clean_name = str(preset.name).strip()
+        if len(clean_name) > 60:
+            raise ValueError("Preset name must not exceed 60 characters.")
+
+        try:
+            dur = float(preset.duration)
+        except (ValueError, TypeError):
+            raise ValueError("Duration must be a valid number.")
+
+        if not math.isfinite(dur) or dur <= 0:
+            raise ValueError("Duration must be a positive, finite number.")
+
+        if preset.range_unit not in ("seconds", "pages"):
+            raise ValueError(f"Unsupported range unit '{preset.range_unit}'.")
+
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            if preset.id is not None:
+                cursor.execute(
+                    "SELECT id FROM chunky_presets WHERE range_unit = ? AND lower(name) = lower(?) AND id != ?",
+                    (preset.range_unit, clean_name, preset.id),
+                )
+            else:
+                cursor.execute(
+                    "SELECT id FROM chunky_presets WHERE range_unit = ? AND lower(name) = lower(?)",
+                    (preset.range_unit, clean_name),
+                )
+            if cursor.fetchone():
+                raise ValueError(f"A preset named '{clean_name}' already exists for {preset.range_unit}.")
+
+    def list_presets(self, range_unit: str = "seconds") -> List[ChunkyPreset]:
+        """Return all saved Chunky presets for the given range unit, ordered by duration."""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, name, duration, range_unit, is_default, is_builtin, created_at, updated_at
+                FROM chunky_presets
+                WHERE range_unit = ?
+                ORDER BY duration ASC, id ASC
+                """,
+                (range_unit,),
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                self.seed_default_presets(conn)
+                cursor.execute(
+                    """
+                    SELECT id, name, duration, range_unit, is_default, is_builtin, created_at, updated_at
+                    FROM chunky_presets
+                    WHERE range_unit = ?
+                    ORDER BY duration ASC, id ASC
+                    """,
+                    (range_unit,),
+                )
+                rows = cursor.fetchall()
+
+            presets = [
+                ChunkyPreset(
+                    id=row["id"],
+                    name=row["name"],
+                    duration=float(row["duration"]),
+                    range_unit=row["range_unit"],
+                    is_default=bool(row["is_default"]),
+                    is_builtin=bool(row["is_builtin"]),
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                )
+                for row in rows
+            ]
+
+            if presets and not any(p.is_default for p in presets):
+                first = presets[0]
+                cursor.execute("UPDATE chunky_presets SET is_default = 1 WHERE id = ?", (first.id,))
+                conn.commit()
+                first.is_default = True
+
+            return presets
+
+    def get_preset(self, preset_id: int) -> Optional[ChunkyPreset]:
+        """Fetch a preset by id."""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, name, duration, range_unit, is_default, is_builtin, created_at, updated_at
+                FROM chunky_presets
+                WHERE id = ?
+                """,
+                (preset_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return ChunkyPreset(
+                id=row["id"],
+                name=row["name"],
+                duration=float(row["duration"]),
+                range_unit=row["range_unit"],
+                is_default=bool(row["is_default"]),
+                is_builtin=bool(row["is_builtin"]),
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+
+    def get_default_preset(self, range_unit: str = "seconds") -> Optional[ChunkyPreset]:
+        """Return the default preset for a range unit, falling back to the first available preset."""
+        presets = self.list_presets(range_unit=range_unit)
+        for p in presets:
+            if p.is_default:
+                return p
+        return presets[0] if presets else None
+
+    def create_preset(self, preset: ChunkyPreset) -> ChunkyPreset:
+        """Validate and insert a new ChunkyPreset."""
+        self.validate_preset(preset)
+        now_str = self.get_now().isoformat()
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            if preset.is_default:
+                cursor.execute(
+                    "UPDATE chunky_presets SET is_default = 0 WHERE range_unit = ?",
+                    (preset.range_unit,),
+                )
+            cursor.execute(
+                """
+                INSERT INTO chunky_presets (
+                    name, duration, range_unit, is_default, is_builtin, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    preset.name.strip(),
+                    float(preset.duration),
+                    preset.range_unit,
+                    1 if preset.is_default else 0,
+                    1 if preset.is_builtin else 0,
+                    now_str,
+                    now_str,
+                ),
+            )
+            preset.id = cursor.lastrowid
+            preset.created_at = now_str
+            preset.updated_at = now_str
+            conn.commit()
+            return preset
+
+    def update_preset(self, preset: ChunkyPreset, allow_builtin: bool = False) -> None:
+        """Validate and update an existing ChunkyPreset. Built-in presets are protected by default."""
+        if not preset.id:
+            raise ValueError("Preset ID required for update.")
+        existing = self.get_preset(preset.id)
+        if existing and existing.is_builtin and not allow_builtin:
+            raise ValueError(f"Built-in preset '{existing.name}' cannot be edited. Create a custom preset instead.")
+        self.validate_preset(preset)
+        now_str = self.get_now().isoformat()
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            if preset.is_default:
+                cursor.execute(
+                    "UPDATE chunky_presets SET is_default = 0 WHERE range_unit = ? AND id != ?",
+                    (preset.range_unit, preset.id),
+                )
+            cursor.execute(
+                """
+                UPDATE chunky_presets
+                SET name = ?, duration = ?, range_unit = ?, is_default = ?, is_builtin = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    preset.name.strip(),
+                    float(preset.duration),
+                    preset.range_unit,
+                    1 if preset.is_default else 0,
+                    1 if preset.is_builtin else 0,
+                    now_str,
+                    preset.id,
+                ),
+            )
+            conn.commit()
+
+    def set_default_preset(self, preset_id: int) -> None:
+        """Set a preset as the active default for its range unit."""
+        preset = self.get_preset(preset_id)
+        if not preset:
+            raise ValueError(f"Preset #{preset_id} not found.")
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE chunky_presets SET is_default = 0 WHERE range_unit = ?",
+                (preset.range_unit,),
+            )
+            cursor.execute(
+                "UPDATE chunky_presets SET is_default = 1 WHERE id = ?",
+                (preset_id,),
+            )
+            conn.commit()
+
+    def delete_preset(self, preset_id: int, allow_builtin: bool = False) -> bool:
+        """Delete a preset, promoting another to default if necessary. Built-in presets are protected."""
+        preset = self.get_preset(preset_id)
+        if not preset:
+            return False
+        if preset.is_builtin and not allow_builtin:
+            raise ValueError(f"Built-in preset '{preset.name}' cannot be deleted. Only custom presets can be deleted.")
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT count(*) as count FROM chunky_presets WHERE range_unit = ?",
+                (preset.range_unit,),
+            )
+            count = cursor.fetchone()["count"]
+            if count <= 1:
+                raise ValueError("Cannot delete the only remaining preset for this resource type.")
+
+            cursor.execute("DELETE FROM chunky_presets WHERE id = ?", (preset_id,))
+            if preset.is_default:
+                cursor.execute(
+                    "SELECT id FROM chunky_presets WHERE range_unit = ? ORDER BY duration ASC, id ASC LIMIT 1",
+                    (preset.range_unit,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    cursor.execute("UPDATE chunky_presets SET is_default = 1 WHERE id = ?", (row["id"],))
+            conn.commit()
+            return True
+
+    def seed_default_presets(self, conn: Optional[sqlite3.Connection] = None) -> None:
+        """Seed default built-in presets for seconds and pages if they don't exist."""
+        now_str = self.get_now().isoformat()
+        should_close = False
+        if conn is None:
+            conn = self.db.get_connection()
+            should_close = True
+
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT count(*) as count FROM chunky_presets WHERE range_unit = 'seconds'")
+            if cursor.fetchone()["count"] == 0:
+                defaults_seconds = [
+                    ("15 minutes", 900.0, False),
+                    ("20 minutes", 1200.0, True),
+                    ("30 minutes", 1800.0, False),
+                    ("45 minutes", 2700.0, False),
+                    ("60 minutes", 3600.0, False),
+                ]
+                for name, dur, is_def in defaults_seconds:
+                    cursor.execute(
+                        """
+                        INSERT OR IGNORE INTO chunky_presets (
+                            name, duration, range_unit, is_default, is_builtin, created_at, updated_at
+                        ) VALUES (?, ?, 'seconds', ?, 1, ?, ?)
+                        """,
+                        (name, dur, 1 if is_def else 0, now_str, now_str),
+                    )
+
+            cursor.execute("SELECT count(*) as count FROM chunky_presets WHERE range_unit = 'pages'")
+            if cursor.fetchone()["count"] == 0:
+                defaults_pages = [
+                    ("5 pages", 5.0, False),
+                    ("10 pages", 10.0, True),
+                    ("15 pages", 15.0, False),
+                    ("20 pages", 20.0, False),
+                    ("25 pages", 25.0, False),
+                ]
+                for name, dur, is_def in defaults_pages:
+                    cursor.execute(
+                        """
+                        INSERT OR IGNORE INTO chunky_presets (
+                            name, duration, range_unit, is_default, is_builtin, created_at, updated_at
+                        ) VALUES (?, ?, 'pages', ?, 1, ?, ?)
+                        """,
+                        (name, dur, 1 if is_def else 0, now_str, now_str),
+                    )
+
+            conn.commit()
+        finally:
+            if should_close:
+                conn.close()
+
+    def get_remaining_intervals(
+        self,
+        completed_intervals: List[Tuple[float, float]],
+        total_range: float,
+    ) -> List[Tuple[float, float]]:
+        """Return all disjoint uncompleted intervals within [0, total_range]."""
+        return get_remaining_intervals(completed_intervals, total_range)
+
+    def propose_entire_remaining_chunk(
+        self,
+        completed_intervals: List[Tuple[float, float]],
+        total_range: float,
+        is_fully_completed: bool = False,
+    ) -> Optional[Tuple[float, float]]:
+        """Propose the entire uncompleted interval of the earliest remaining gap."""
+        return propose_entire_remaining_chunk(
+            completed_intervals=completed_intervals,
+            total_range=total_range,
+            is_fully_completed=is_fully_completed,
+        )
+
 
     def get_or_create_resource(
         self,

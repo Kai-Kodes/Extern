@@ -178,3 +178,16 @@ class ChunkyTask:
     id: Optional[int] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+@dataclass
+class ChunkyPreset:
+    name: str
+    duration: float  # In natural unit: seconds for media, pages for documents
+    range_unit: str = "seconds"  # 'seconds' or 'pages'
+    is_default: bool = False
+    is_builtin: bool = False
+    id: Optional[int] = None
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
