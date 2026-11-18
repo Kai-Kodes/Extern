@@ -1,11 +1,35 @@
 """Configuration management for Todo CLI."""
 
-import ast
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 import tomllib
+
+
+DEFAULT_DROPBOX_APP_KEY = "bcfyaam7zsvenih"
+DEFAULT_DROPBOX_PATH = "/todo.db"
+
+
+def _serialize_toml(data: Dict[str, Dict[str, Any]]) -> str:
+    """Serialize dictionary of sections into standard TOML string."""
+    lines = []
+    for section, sec_data in data.items():
+        if not sec_data:
+            continue
+        lines.append(f"[{section}]")
+        for k, v in sec_data.items():
+            if v is None:
+                continue
+            if isinstance(v, bool):
+                lines.append(f"{k} = {'true' if v else 'false'}")
+            elif isinstance(v, (int, float)):
+                lines.append(f"{k} = {v}")
+            else:
+                s_val = str(v).replace("\\", "\\\\").replace('"', '\\"')
+                lines.append(f'{k} = "{s_val}"')
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
 
 
 @dataclass
@@ -20,36 +44,50 @@ class Config:
     pomodoro_work_sound: Optional[str] = None
     pomodoro_break_sound: Optional[str] = None
     pomodoro_audio_player: Optional[str] = None
+    dropbox_app_key: str = DEFAULT_DROPBOX_APP_KEY
+    dropbox_refresh_token: Optional[str] = None
+    dropbox_access_token: Optional[str] = None
+    dropbox_path: str = DEFAULT_DROPBOX_PATH
+    dropbox_sync_enabled: bool = True
 
     @classmethod
-    def load(cls) -> "Config":
-        """Load configuration from config.toml, environment variables, or defaults."""
+    def get_config_dir(cls) -> Path:
+        """Resolve the active configuration directory (~/.config/todo)."""
         xdg_config = os.environ.get("XDG_CONFIG_HOME")
-        config_dir = (
+        return (
             Path(xdg_config) / "todo"
             if xdg_config
             else Path.home() / ".config" / "todo"
         )
-        config_file = config_dir / "config.toml"
 
+    @classmethod
+    def get_config_path(cls) -> Path:
+        """Resolve the active configuration file path (~/.config/todo/config.toml)."""
         env_config = os.environ.get("TODO_CONFIG_PATH")
         if env_config:
-            config_file = Path(env_config).expanduser().resolve()
+            return Path(env_config).expanduser().resolve()
+        return cls.get_config_dir() / "config.toml"
 
+    @classmethod
+    def get_data_dir(cls) -> Path:
+        """Resolve the active data directory (~/.local/share/todo)."""
         xdg_data = os.environ.get("XDG_DATA_HOME")
-        default_data_dir = (
+        return (
             Path(xdg_data) / "todo"
             if xdg_data
             else Path.home() / ".local" / "share" / "todo"
         )
-        default_db_path = default_data_dir / "todo.db"
 
-        # Check environment variable override for db_path
+    @classmethod
+    def load(cls) -> "Config":
+        """Load configuration from config.toml, environment variables, or defaults."""
+        config_file = cls.get_config_path()
+        data_dir = cls.get_data_dir()
+        default_db_path = data_dir / "todo.db"
+
+        # Database path
         env_db = os.environ.get("TODO_DB_PATH")
-        if env_db:
-            db_path = Path(env_db).expanduser().resolve()
-        else:
-            db_path = default_db_path
+        db_path = Path(env_db).expanduser().resolve() if env_db else default_db_path
 
         filemeta_command = "filemeta"
         filemeta_timeout = 60
@@ -58,7 +96,6 @@ class Config:
         telegram_api_hash: Optional[str] = None
         telegram_session_path: Optional[Path] = None
 
-        # Check environment variables for Filemeta timeouts
         env_fm_timeout = os.environ.get("FILEMETA_TIMEOUT") or os.environ.get("TODO_FILEMETA_TIMEOUT")
         if env_fm_timeout and env_fm_timeout.isdigit():
             filemeta_timeout = int(env_fm_timeout)
@@ -67,7 +104,6 @@ class Config:
         if env_fm_dev_timeout and env_fm_dev_timeout.isdigit():
             filemeta_device_timeout = int(env_fm_dev_timeout)
 
-        # Check environment variables for Telegram
         env_tg_api_id = os.environ.get("TELEGRAM_API_ID")
         if env_tg_api_id and env_tg_api_id.isdigit():
             telegram_api_id = int(env_tg_api_id)
@@ -84,13 +120,21 @@ class Config:
         pomodoro_break_sound = os.environ.get("TODO_POMODORO_BREAK_SOUND")
         pomodoro_audio_player = os.environ.get("TODO_POMODORO_PLAYER")
 
+        dropbox_app_key = os.environ.get("DROPBOX_APP_KEY") or DEFAULT_DROPBOX_APP_KEY
+        dropbox_refresh_token = os.environ.get("DROPBOX_REFRESH_TOKEN")
+        dropbox_access_token = os.environ.get("DROPBOX_ACCESS_TOKEN")
+        dropbox_path = os.environ.get("DROPBOX_PATH") or DEFAULT_DROPBOX_PATH
+        dropbox_sync_enabled = True
+        if os.environ.get("DROPBOX_SYNC_ENABLED", "").lower() in ("0", "false", "no"):
+            dropbox_sync_enabled = False
+
         if config_file.exists():
             try:
                 with open(config_file, "rb") as f:
                     data = tomllib.load(f)
 
                 if "general" in data and "db_path" in data["general"]:
-                    if not env_db:  # Environment variable takes precedence
+                    if not env_db:
                         db_path = Path(data["general"]["db_path"]).expanduser().resolve()
 
                 if "filemeta" in data:
@@ -126,27 +170,26 @@ class Config:
                     if not pomodoro_audio_player and "player" in pomo_sec:
                         pomodoro_audio_player = str(pomo_sec["player"]).strip()
 
+                if "dropbox" in data:
+                    dbx_sec = data["dropbox"]
+                    if "app_key" in dbx_sec and not os.environ.get("DROPBOX_APP_KEY"):
+                        dropbox_app_key = str(dbx_sec["app_key"]).strip()
+                    if "refresh_token" in dbx_sec and not os.environ.get("DROPBOX_REFRESH_TOKEN"):
+                        dropbox_refresh_token = str(dbx_sec["refresh_token"]).strip()
+                    if "access_token" in dbx_sec and not os.environ.get("DROPBOX_ACCESS_TOKEN"):
+                        dropbox_access_token = str(dbx_sec["access_token"]).strip()
+                    if "path" in dbx_sec and not os.environ.get("DROPBOX_PATH"):
+                        dropbox_path = str(dbx_sec["path"]).strip()
+                    if "enabled" in dbx_sec and not os.environ.get("DROPBOX_SYNC_ENABLED"):
+                        dropbox_sync_enabled = bool(dbx_sec["enabled"])
+
             except Exception:
-                # If config parsing fails, fallback gracefully to defaults
                 pass
 
-        # Automatic fallback for Telegram session path if not explicitly configured
+        # Standard default session path in data directory (~/.local/share/todo/telegram.session)
         if not telegram_session_path:
-            candidate_home_session = Path.home() / "course_session.session"
-            if candidate_home_session.exists():
-                telegram_session_path = Path.home() / "course_session"
-            else:
-                candidate_config_session = config_dir / "course_session.session"
-                if candidate_config_session.exists():
-                    telegram_session_path = config_dir / "course_session"
-
-        # Automatic fallback for API credentials from local duration.py if available
-        if not telegram_api_id or not telegram_api_hash:
-            leg_id, leg_hash = cls._extract_local_telegram_creds()
-            if not telegram_api_id and leg_id:
-                telegram_api_id = leg_id
-            if not telegram_api_hash and leg_hash:
-                telegram_api_hash = leg_hash
+            default_session = data_dir / "telegram.session"
+            telegram_session_path = default_session
 
         return cls(
             db_path=db_path,
@@ -159,30 +202,89 @@ class Config:
             pomodoro_work_sound=pomodoro_work_sound,
             pomodoro_break_sound=pomodoro_break_sound,
             pomodoro_audio_player=pomodoro_audio_player,
+            dropbox_app_key=dropbox_app_key,
+            dropbox_refresh_token=dropbox_refresh_token,
+            dropbox_access_token=dropbox_access_token,
+            dropbox_path=dropbox_path,
+            dropbox_sync_enabled=dropbox_sync_enabled,
         )
 
     @classmethod
-    def _extract_local_telegram_creds(cls) -> tuple[Optional[int], Optional[str]]:
-        """Safely parse legacy telegram-tools/duration.py AST without executing it."""
-        duration_file = Path.home() / "telegram-tools" / "duration.py"
-        if not duration_file.exists():
-            return None, None
+    def _read_raw_toml(cls) -> Dict[str, Dict[str, Any]]:
+        """Read existing config.toml into a nested dict, or return empty dict."""
+        cfg_path = cls.get_config_path()
+        if not cfg_path.exists():
+            return {}
         try:
-            tree = ast.parse(duration_file.read_text())
-            api_id = None
-            api_hash = None
-            for node in tree.body:
-                if isinstance(node, ast.Assign):
-                    for target in node.targets:
-                        if isinstance(target, ast.Name):
-                            if target.id == "api_id" and isinstance(node.value, ast.Constant):
-                                api_id = int(node.value.value)
-                            elif target.id == "api_hash" and isinstance(node.value, ast.Constant):
-                                api_hash = str(node.value.value)
-            return api_id, api_hash
+            with open(cfg_path, "rb") as f:
+                return tomllib.load(f)
         except Exception:
-            return None, None
+            return {}
+
+    @classmethod
+    def _write_raw_toml(cls, data: Dict[str, Dict[str, Any]]) -> None:
+        """Atomically write dictionary to config.toml."""
+        cfg_path = cls.get_config_path()
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        content = _serialize_toml(data)
+        tmp_path = cfg_path.with_suffix(".tmp")
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(cfg_path)
+
+    @classmethod
+    def save_dropbox_credentials(
+        cls,
+        refresh_token: str,
+        app_key: Optional[str] = None,
+        path: Optional[str] = None,
+    ) -> None:
+        """Save Dropbox credentials into config.toml."""
+        data = cls._read_raw_toml()
+        if "dropbox" not in data:
+            data["dropbox"] = {}
+        data["dropbox"]["refresh_token"] = refresh_token
+        if app_key:
+            data["dropbox"]["app_key"] = app_key
+        if path:
+            data["dropbox"]["path"] = path
+        data["dropbox"]["enabled"] = True
+        cls._write_raw_toml(data)
+
+    @classmethod
+    def clear_dropbox_credentials(cls) -> None:
+        """Remove Dropbox refresh token from config.toml."""
+        data = cls._read_raw_toml()
+        if "dropbox" in data:
+            data["dropbox"].pop("refresh_token", None)
+            cls._write_raw_toml(data)
+
+    @classmethod
+    def save_telegram_credentials(
+        cls,
+        api_id: int,
+        api_hash: str,
+        session_path: Optional[Path] = None,
+    ) -> None:
+        """Save Telegram credentials into config.toml."""
+        data = cls._read_raw_toml()
+        if "telegram" not in data:
+            data["telegram"] = {}
+        data["telegram"]["api_id"] = int(api_id)
+        data["telegram"]["api_hash"] = str(api_hash).strip()
+        if session_path:
+            data["telegram"]["session_path"] = str(session_path)
+        cls._write_raw_toml(data)
+
+    @classmethod
+    def clear_telegram_credentials(cls) -> None:
+        """Remove Telegram credentials from config.toml."""
+        data = cls._read_raw_toml()
+        if "telegram" in data:
+            data["telegram"].pop("api_id", None)
+            data["telegram"].pop("api_hash", None)
+            cls._write_raw_toml(data)
 
     def ensure_directories(self) -> None:
-        """Ensure database directory exists."""
+        """Ensure database and configuration directories exist."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.get_config_dir().mkdir(parents=True, exist_ok=True)

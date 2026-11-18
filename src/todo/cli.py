@@ -1,7 +1,9 @@
-"""Command line interface entrypoint for Todo CLI."""
+"""Command line interface entrypoint for Extern (Todo CLI)."""
 
+import shutil
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import click
@@ -12,18 +14,35 @@ from todo.config import Config
 from todo.database import Database
 from todo.services.daily_service import DailyService
 from todo.services.source_service import SourceService
+from todo.services.sync_service import SyncService
 from todo.services.task_service import TaskService
 from todo.ui.app import TodoApp
 from todo.ui.console import console, format_today_title
 
 
 @click.group(invoke_without_command=True)
+@click.option("--no-sync", is_flag=True, help="Disable automatic Dropbox sync for this session.")
 @click.pass_context
-def cli(ctx: click.Context) -> None:
-    """Personal Todo CLI application with Filemeta integration."""
+def cli(ctx: click.Context, no_sync: bool) -> None:
+    """Extern: Standalone local-first task and course management CLI with native sync."""
     if ctx.invoked_subcommand is None:
-        app = TodoApp()
+        config = Config.load()
+        sync_svc: Optional[SyncService] = None
+
+        if config.dropbox_refresh_token and not no_sync:
+            sync_svc = SyncService(config)
+            # Automatic pull on startup before opening local database
+            ok, msg = sync_svc.pull()
+            if not ok and "Offline" not in msg:
+                console.print(f"[yellow]Notice: {msg}[/yellow]")
+
+        app = TodoApp(config=config, sync_service=sync_svc, no_sync=no_sync)
         app.run()
+
+
+# -----------------------------------------------------------------------------
+# Today & Task Commands
+# -----------------------------------------------------------------------------
 
 
 @cli.command("today")
@@ -103,13 +122,13 @@ def list_cmd() -> None:
 
 @cli.command("sources")
 def sources_cmd() -> None:
-    """List imported Filemeta sources."""
+    """List imported course sources."""
     config = Config.load()
     db = Database(config.db_path)
     source_service = SourceService(db)
     sources = source_service.get_sources()
 
-    console.print("\n[bold bright_white]FILEMETA SOURCES[/bold bright_white]\n")
+    console.print("\n[bold bright_white]IMPORTED SOURCES[/bold bright_white]\n")
     if not sources:
         console.print("  [dim italic]No sources imported yet.[/dim italic]\n")
         return
@@ -131,6 +150,286 @@ def db_checkpoint_cmd() -> None:
     finally:
         db.close()
 
+
+# -----------------------------------------------------------------------------
+# Auth Commands (`extern auth dropbox` & `extern auth telegram`)
+# -----------------------------------------------------------------------------
+
+
+@cli.group("auth")
+def auth_group() -> None:
+    """Manage authentication for Dropbox sync and Telegram courses."""
+    pass
+
+
+@auth_group.command("dropbox")
+@click.option("--logout", is_flag=True, help="Unlink Dropbox account and clear saved credentials.")
+@click.option("--app-key", help="Dropbox App Key (defaults to built-in or configured app_key).")
+def auth_dropbox_cmd(logout: bool, app_key: Optional[str]) -> None:
+    """Authorize Dropbox for automatic cross-device database synchronization."""
+    if logout:
+        Config.clear_dropbox_credentials()
+        console.print("\n[bold green]✓ Unlinked Dropbox account and cleared saved credentials.[/bold green]\n")
+        return
+
+    config = Config.load()
+    sync_svc = SyncService(config)
+    key = app_key or config.dropbox_app_key
+
+    console.print("\n[bold bright_white]DROPBOX AUTHENTICATION (PKCE)[/bold bright_white]\n")
+    try:
+        auth_url, flow = sync_svc.create_pkce_flow(app_key=key)
+        console.print("1. Open this link in your web browser to authorize Extern:")
+        console.print(f"   [bold cyan underline]{auth_url}[/bold cyan underline]\n")
+        console.print("2. Click 'Allow' and copy the authorization code.\n")
+
+        auth_code = click.prompt("Paste authorization code here", type=str)
+
+        refresh_token = sync_svc.finish_pkce_flow(flow, auth_code)
+        Config.save_dropbox_credentials(refresh_token=refresh_token, app_key=key)
+
+        console.print("\n[bold green]✓ Dropbox successfully linked![/bold green]")
+        console.print("[dim]Testing connection and verifying remote sync...[/dim]")
+
+        new_cfg = Config.load()
+        new_svc = SyncService(new_cfg)
+        ok, msg = new_svc.push()
+        if ok:
+            console.print("[bold green]✓ Initial database sync complete.[/bold green]\n")
+        else:
+            console.print(f"[yellow]Notice: {msg}[/yellow]\n")
+    except Exception as e:
+        console.print(f"\n[bold red]✗ Dropbox authentication failed: {e}[/bold red]\n")
+
+
+@auth_group.command("telegram")
+@click.option("--logout", is_flag=True, help="Log out and remove local Telegram session.")
+def auth_telegram_cmd(logout: bool) -> None:
+    """Interactively authenticate Telegram for video lesson courses."""
+    config = Config.load()
+    session_path = config.telegram_session_path or (config.get_data_dir() / "telegram.session")
+
+    if logout:
+        session_file = session_path
+        if session_file and not str(session_file).endswith(".session"):
+            session_file = Path(f"{session_file}.session")
+
+        if session_file and session_file.exists():
+            try:
+                session_file.unlink()
+            except OSError as e:
+                console.print(f"[yellow]Warning: Could not remove session file: {e}[/yellow]")
+
+        Config.clear_telegram_credentials()
+        console.print("\n[bold green]✓ Logged out of Telegram and removed local session file.[/bold green]\n")
+        return
+
+    console.print("\n[bold bright_white]TELEGRAM AUTHENTICATION[/bold bright_white]\n")
+    api_id = config.telegram_api_id
+    api_hash = config.telegram_api_hash
+
+    if not api_id or not api_hash:
+        console.print("Get your API credentials from [bold cyan]https://my.telegram.org[/bold cyan] (API development tools).\n")
+        api_id = click.prompt("  Telegram API ID", type=int)
+        api_hash = click.prompt("  Telegram API Hash", type=str)
+
+    Config.save_telegram_credentials(api_id, api_hash, session_path=session_path)
+
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    session_base = str(session_path)
+    if session_base.endswith(".session"):
+        session_base = session_base[:-8]
+
+    try:
+        from telethon.sync import TelegramClient
+
+        console.print("\n[dim]Connecting to Telegram...[/dim]")
+        with TelegramClient(session_base, api_id, api_hash) as client:
+            if not client.is_user_authorized():
+                client.start()
+
+            me = client.get_me()
+            name = f"{me.first_name} {me.last_name or ''}".strip()
+            handle = f"@{me.username}" if me.username else me.phone
+            console.print(f"\n[bold green]✓ Successfully authenticated as {name} ({handle})![/bold green]")
+            console.print(f"[dim]Session saved to: {session_path}[/dim]\n")
+    except Exception as e:
+        console.print(f"\n[bold red]✗ Telegram authentication failed: {e}[/bold red]\n")
+
+
+# -----------------------------------------------------------------------------
+# Sync Commands (`extern sync` / `pull` / `push` / `status`)
+# -----------------------------------------------------------------------------
+
+
+@cli.group("sync", invoke_without_command=True)
+@click.pass_context
+def sync_group(ctx: click.Context) -> None:
+    """Manage native Dropbox synchronization."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(sync_status_cmd)
+
+
+@sync_group.command("pull")
+@click.option("-f", "--force", is_flag=True, help="Force pull even if cached revision matches.")
+def sync_pull_cmd(force: bool) -> None:
+    """Pull the latest database from Dropbox."""
+    config = Config.load()
+    sync_svc = SyncService(config)
+    if not sync_svc.is_configured:
+        console.print("[yellow]Dropbox sync is not configured. Run 'extern auth dropbox' first.[/yellow]")
+        return
+
+    console.print("Pulling latest database from Dropbox...")
+    ok, msg = sync_svc.pull(force=force)
+    if ok:
+        console.print(f"[bold green]✓ {msg}[/bold green]")
+    else:
+        console.print(f"[bold red]✗ {msg}[/bold red]")
+
+
+@sync_group.command("push")
+@click.option("-f", "--force", is_flag=True, help="Force push local database to Dropbox.")
+def sync_push_cmd(force: bool) -> None:
+    """Checkpoint local SQLite WAL and push database to Dropbox."""
+    config = Config.load()
+    sync_svc = SyncService(config)
+    if not sync_svc.is_configured:
+        console.print("[yellow]Dropbox sync is not configured. Run 'extern auth dropbox' first.[/yellow]")
+        return
+
+    console.print("Pushing database to Dropbox...")
+    ok, msg = sync_svc.push(force=force)
+    if ok:
+        console.print(f"[bold green]✓ {msg}[/bold green]")
+    else:
+        console.print(f"[bold red]✗ {msg}[/bold red]")
+
+
+@sync_group.command("status")
+def sync_status_cmd() -> None:
+    """Display Dropbox sync status and cached revision details."""
+    config = Config.load()
+    sync_svc = SyncService(config)
+    st = sync_svc.status()
+
+    console.print("\n[bold bright_white]DROPBOX SYNC STATUS[/bold bright_white]\n")
+    table = Table.grid(padding=(0, 2))
+    table.add_column("Key", style="bold cyan")
+    table.add_column("Value")
+
+    table.add_row("Configured", "[green]Yes[/green]" if st["configured"] else "[dim]No (Run 'extern auth dropbox')[/dim]")
+    table.add_row("Remote Path", st["remote_path"])
+    table.add_row("Local DB", f"{st['local_db_path']} ({st['local_db_size_bytes']} bytes)")
+    table.add_row("Connection", st["connection"])
+    table.add_row("Cached Rev", st["cached_rev"] or "[dim]None[/dim]")
+    table.add_row("Last Pull", st["last_pull_at"] or "[dim]Never[/dim]")
+    table.add_row("Last Push", st["last_push_at"] or "[dim]Never[/dim]")
+    table.add_row("Sync Status", st["last_sync_status"])
+
+    console.print(table)
+    console.print()
+
+
+# -----------------------------------------------------------------------------
+# Diagnostics (`extern doctor` / `extern status`)
+# -----------------------------------------------------------------------------
+
+
+@cli.command("doctor")
+def doctor_cmd() -> None:
+    """Inspect system configuration, database, scanner, and integrations status."""
+    config = Config.load()
+
+    console.print("\n[bold bright_white]EXTERN SYSTEM DIAGNOSTICS[/bold bright_white]\n")
+    table = Table(box=None, padding=(0, 2))
+    table.add_column("Component", style="bold cyan", width=22)
+    table.add_column("Status", width=14)
+    table.add_column("Details", style="dim")
+
+    # 1. Config file
+    cfg_path = config.get_config_path()
+    if cfg_path.exists():
+        table.add_row("Configuration", "[bold green]OK[/bold green]", str(cfg_path))
+    else:
+        table.add_row("Configuration", "[yellow]Default[/yellow]", f"{cfg_path} (not created yet, using defaults)")
+
+    # 2. Database
+    db_path = config.db_path
+    if db_path.exists():
+        db_size = f"{db_path.stat().st_size / 1024:.1f} KiB"
+        wal_file = Path(f"{db_path}-wal")
+        wal_status = "active WAL" if wal_file.exists() and wal_file.stat().st_size > 0 else "clean (checkpointed)"
+        table.add_row("SQLite Database", "[bold green]OK[/bold green]", f"{db_path} ({db_size}, {wal_status})")
+    else:
+        table.add_row("SQLite Database", "[yellow]Not Found[/yellow]", f"{db_path} (will be created on first run)")
+
+    # 3. Course Scanner
+    fm_cmd = shutil.which(config.filemeta_command)
+    try:
+        import tinytag  # noqa: F401
+        tinytag_ok = True
+    except ImportError:
+        tinytag_ok = False
+
+    if fm_cmd:
+        scanner_detail = f"External filemeta ({fm_cmd}) + Pure-Python TinyTag fallback"
+    elif tinytag_ok:
+        scanner_detail = "Built-in Pure-Python scanner with TinyTag duration extraction"
+    else:
+        scanner_detail = "Built-in Pure-Python scanner (tinytag not installed)"
+
+    table.add_row("Course Scanner", "[bold green]OK[/bold green]", scanner_detail)
+
+    # 4. YouTube integration
+    try:
+        import yt_dlp  # noqa: F401
+        table.add_row("YouTube (yt-dlp)", "[bold green]OK[/bold green]", f"yt-dlp version {yt_dlp.version.__version__}")
+    except ImportError:
+        table.add_row("YouTube (yt-dlp)", "[yellow]Missing[/yellow]", "yt-dlp is not installed in the Python environment")
+
+    # 5. Telegram integration
+    try:
+        import telethon  # noqa: F401
+        telethon_installed = True
+    except ImportError:
+        telethon_installed = False
+
+    session_file = config.telegram_session_path
+    if session_file and not str(session_file).endswith(".session"):
+        session_file = Path(f"{session_file}.session")
+
+    if not telethon_installed:
+        table.add_row("Telegram", "[yellow]Missing[/yellow]", "Telethon library is not installed")
+    elif not config.telegram_api_id or not config.telegram_api_hash:
+        table.add_row("Telegram", "[dim]Not Configured[/dim]", "API credentials not set (run 'extern auth telegram')")
+    elif not session_file or not session_file.exists():
+        table.add_row("Telegram", "[yellow]Not Signed In[/yellow]", f"Session file not found at {session_file} (run 'extern auth telegram')")
+    else:
+        table.add_row("Telegram", "[bold green]Authenticated[/bold green]", f"Session: {session_file}")
+
+    # 6. Dropbox sync engine
+    sync_svc = SyncService(config)
+    st = sync_svc.status()
+    if not st["configured"]:
+        table.add_row("Dropbox Sync", "[dim]Not Configured[/dim]", "No refresh token (run 'extern auth dropbox')")
+    else:
+        rev_info = f"rev {st['cached_rev']}" if st["cached_rev"] else "not synced yet"
+        conn_info = st["connection"]
+        if conn_info == "online":
+            table.add_row("Dropbox Sync", "[bold green]Linked[/bold green]", f"Online, {rev_info} -> {st['remote_path']}")
+        else:
+            table.add_row("Dropbox Sync", "[yellow]Unreachable[/yellow]", f"{conn_info}, {rev_info}")
+
+    console.print(table)
+    console.print()
+
+
+@cli.command("status")
+@click.pass_context
+def status_alias_cmd(ctx: click.Context) -> None:
+    """Alias for 'extern doctor'."""
+    ctx.invoke(doctor_cmd)
 
 
 def main() -> None:

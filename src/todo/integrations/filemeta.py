@@ -62,6 +62,9 @@ VIDEO_EXTENSIONS = {
     ".webm",
     ".flv",
     ".wmv",
+    ".m4v",
+    ".ts",
+    ".3gp",
 }
 
 AUDIO_EXTENSIONS = {
@@ -71,16 +74,133 @@ AUDIO_EXTENSIONS = {
     ".aac",
     ".ogg",
     ".m4a",
+    ".wma",
+    ".opus",
 }
 
 DOCUMENT_EXTENSIONS = {
     ".pdf",
+    ".epub",
     ".doc",
     ".docx",
     ".odt",
     ".txt",
     ".md",
 }
+
+
+def natural_sort_key(s: Any) -> List[Any]:
+    """Split string into numeric and string fragments for natural alphanumeric sorting."""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", str(s))]
+
+
+def scan_folder_builtin(
+    root_path: Path | str,
+    canonical_uri: Optional[str] = None,
+) -> "FilemetaScanResult":
+    """
+    Recursively scan a directory using pure Python and TinyTag.
+    Extracts duration for media, natural sorting positions, and produces
+    the standard FilemetaScanResult structure.
+    """
+    root_resolved = Path(root_path).expanduser().resolve()
+    source_name = root_resolved.name or str(root_resolved)
+    source_path = str(root_resolved)
+    if canonical_uri is None:
+        canonical_uri = compute_canonical_uri(root_resolved)
+
+    folders: List[ScannedFolder] = []
+    items: List[ScannedFile] = []
+    position_counter = 0
+
+    def _scan_dir(current_dir: Path, parent_rel: Optional[str]) -> None:
+        nonlocal position_counter
+        try:
+            entries = list(current_dir.iterdir())
+        except (PermissionError, OSError):
+            return
+
+        # Filter out hidden files and directories
+        dirs = [e for e in entries if e.is_dir() and not e.name.startswith(".")]
+        files = [e for e in entries if e.is_file() and not e.name.startswith(".")]
+
+        # Natural alphanumeric sorting
+        dirs.sort(key=lambda d: natural_sort_key(d.name))
+        files.sort(key=lambda f: natural_sort_key(f.name))
+
+        # Process files in current directory
+        for f in files:
+            position_counter += 1
+            filename = f.name
+            filepath = str(f)
+            title = clean_file_title(filename)
+            item_type = determine_file_type(filename)
+            ext = f.suffix.lower()
+            try:
+                file_size = f.stat().st_size
+            except OSError:
+                file_size = 0
+
+            rel_path = str(f.relative_to(root_resolved))
+
+            # Extract duration for media files using tinytag
+            duration = 0.0
+            if item_type in ("video", "audio"):
+                try:
+                    from tinytag import TinyTag
+                    tag = TinyTag.get(filepath)
+                    if tag and tag.duration is not None and tag.duration > 0:
+                        duration = round(float(tag.duration), 2)
+                except Exception:
+                    duration = 0.0
+
+            metadata: Dict[str, Any] = {
+                "position": position_counter,
+                "size": file_size,
+            }
+            if duration > 0:
+                metadata["duration"] = duration
+
+            items.append(
+                ScannedFile(
+                    name=filename,
+                    path=filepath,
+                    title=title,
+                    type=item_type,
+                    relative_path=rel_path,
+                    parent_relative_path=parent_rel,
+                    size=file_size,
+                    extension=ext,
+                    metadata=metadata,
+                )
+            )
+
+        # Process subdirectories recursively
+        for d in dirs:
+            dir_name = d.name
+            dir_path = str(d)
+            rel_path = str(d.relative_to(root_resolved))
+            folders.append(
+                ScannedFolder(
+                    name=dir_name,
+                    path=dir_path,
+                    relative_path=rel_path,
+                    parent_relative_path=parent_rel,
+                )
+            )
+            _scan_dir(d, parent_rel=rel_path)
+
+    _scan_dir(root_resolved, parent_rel=None)
+
+    return FilemetaScanResult(
+        source_name=source_name,
+        source_path=source_path,
+        canonical_uri=canonical_uri,
+        folders=folders,
+        items=items,
+        scan_status="completed",
+    )
+
 
 
 def clean_file_title(filename: str) -> str:
@@ -221,7 +341,7 @@ class FilemetaScanResult:
 
 
 class FilemetaAdapter:
-    """Adapter for invoking the external `filemeta` CLI and normalizing output."""
+    """Adapter for invoking the external `filemeta` CLI or falling back to built-in scanner."""
 
     def __init__(
         self,
@@ -229,11 +349,13 @@ class FilemetaAdapter:
         timeout: int = 60,
         device_timeout: int = 300,
         command_runner: Optional[Callable[..., subprocess.CompletedProcess]] = None,
+        allow_builtin_fallback: bool = True,
     ):
         self.command = command
         self.default_timeout = timeout
         self.device_timeout = device_timeout
         self._runner = command_runner
+        self.allow_builtin_fallback = allow_builtin_fallback
 
     @staticmethod
     def is_device_path(folder_path: str | Path) -> bool:
@@ -246,13 +368,27 @@ class FilemetaAdapter:
             return self.device_timeout
         return self.default_timeout
 
-    def check_availability(self) -> bool:
-        """Check if the configured filemeta command is accessible in PATH."""
+    def has_external_command(self) -> bool:
+        """Check if the configured external filemeta command is present on PATH or custom runner set."""
+        if self._runner is not None:
+            return True
         return shutil.which(self.command) is not None
 
+    def check_availability(self) -> bool:
+        """Check if filemeta scanning is available (always True with built-in fallback)."""
+        if self.allow_builtin_fallback:
+            return True
+        return self.has_external_command()
+
     def is_available(self) -> bool:
-        """Check if the configured filemeta command is accessible in PATH."""
+        """Check if filemeta scanning is available."""
         return self.check_availability()
+
+    def scan_folder_builtin(
+        self, folder_path: str | Path, canonical_uri: Optional[str] = None
+    ) -> FilemetaScanResult:
+        """Scan a folder using the built-in pure-Python scanner."""
+        return scan_folder_builtin(folder_path, canonical_uri=canonical_uri)
 
     def scan_folder(
         self,
@@ -260,7 +396,7 @@ class FilemetaAdapter:
         timeout: Optional[int] = None,
     ) -> FilemetaScanResult:
         """
-        Scan a folder using filemeta -j and parse the resulting metadata tree.
+        Scan a folder using external filemeta if available, or fall back to built-in scanner.
 
         Raises:
             FilemetaNotFoundError
@@ -271,12 +407,6 @@ class FilemetaAdapter:
             FilemetaExecutionError
             FilemetaParseError
         """
-        if not self.check_availability():
-            raise FilemetaNotFoundError(
-                f"Command '{self.command}' not found. "
-                "Please verify that filemeta is installed and in your PATH."
-            )
-
         # Expand and resolve target directory
         raw_path = Path(folder_path).expanduser()
         try:
@@ -322,69 +452,84 @@ class FilemetaAdapter:
         if not is_readable:
             raise PermissionDeniedError(f"Permission denied accessing folder '{folder_path}'.")
 
-        # Determine scan timeout: explicit > device detection > default
-        effective_timeout = (
-            timeout
-            if timeout is not None
-            else self.get_timeout_for_path(resolved_path)
-        )
-
-        # Run filemeta with -j (JSON) flag
-        runner = self._runner or subprocess.run
-        try:
-            proc = runner(
-                [self.command, "-j", str(resolved_path)],
-                capture_output=True,
-                text=True,
-                timeout=effective_timeout,
+        # If external command is present on PATH, use it
+        if self.has_external_command():
+            # Determine scan timeout: explicit > device detection > default
+            effective_timeout = (
+                timeout
+                if timeout is not None
+                else self.get_timeout_for_path(resolved_path)
             )
-        except subprocess.TimeoutExpired as e:
-            raise FilemetaTimeoutError(
-                f"filemeta timed out after {effective_timeout}s while scanning '{folder_path}'. "
-                "Remote or device storage may be slow or unresponsive.",
-                timeout=effective_timeout,
-                path=str(folder_path),
-            ) from e
-        except OSError as e:
-            raise FilemetaExecutionError(f"Failed to execute '{self.command}': {e}") from e
 
-        if proc.returncode != 0:
-            stderr_msg = proc.stderr.strip() or f"exit code {proc.returncode}"
-            if any(
-                term in stderr_msg.lower()
-                for term in ("transport endpoint", "input/output error", "device", "disconnected")
-            ):
-                raise FilemetaExecutionError(
-                    f"filemeta failed (storage device may have disconnected or unmounted): {stderr_msg}"
+            # Run filemeta with -j (JSON) flag
+            runner = self._runner or subprocess.run
+            try:
+                proc = runner(
+                    [self.command, "-j", str(resolved_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=effective_timeout,
                 )
-            raise FilemetaExecutionError(f"filemeta failed: {stderr_msg}")
+            except subprocess.TimeoutExpired as e:
+                raise FilemetaTimeoutError(
+                    f"filemeta timed out after {effective_timeout}s while scanning '{folder_path}'. "
+                    "Remote or device storage may be slow or unresponsive.",
+                    timeout=effective_timeout,
+                    path=str(folder_path),
+                ) from e
+            except OSError as e:
+                if not self.allow_builtin_fallback:
+                    raise FilemetaExecutionError(f"Failed to execute '{self.command}': {e}") from e
+                return self.scan_folder_builtin(resolved_path)
 
-        # Parse JSON output
-        try:
-            data = json.loads(proc.stdout)
-        except json.JSONDecodeError as e:
-            raise FilemetaParseError(f"Invalid JSON returned by filemeta: {e}") from e
+            if proc.returncode != 0:
+                stderr_msg = proc.stderr.strip() or f"exit code {proc.returncode}"
+                if any(
+                    term in stderr_msg.lower()
+                    for term in ("transport endpoint", "input/output error", "device", "disconnected")
+                ):
+                    raise FilemetaExecutionError(
+                        f"filemeta failed (storage device may have disconnected or unmounted): {stderr_msg}"
+                    )
+                raise FilemetaExecutionError(f"filemeta failed: {stderr_msg}")
 
-        if not isinstance(data, dict):
-            raise FilemetaParseError("Unexpected JSON output from filemeta (expected object).")
+            # Parse JSON output
+            try:
+                data = json.loads(proc.stdout)
+            except json.JSONDecodeError as e:
+                raise FilemetaParseError(f"Invalid JSON returned by filemeta: {e}") from e
 
-        source_name = data.get("name") or resolved_path.name
-        source_path = str(resolved_path)
-        canonical_uri = compute_canonical_uri(resolved_path)
+            if not isinstance(data, dict):
+                raise FilemetaParseError("Unexpected JSON output from filemeta (expected object).")
 
-        # Recursively collect folders and files from JSON tree
-        folders: List[ScannedFolder] = []
-        items: List[ScannedFile] = []
-        self._collect_tree(data, resolved_path, folders, items, parent_rel="")
+            source_name = data.get("name") or resolved_path.name
+            source_path = str(resolved_path)
+            canonical_uri = compute_canonical_uri(resolved_path)
 
-        return FilemetaScanResult(
-            source_name=source_name,
-            source_path=source_path,
-            canonical_uri=canonical_uri,
-            folders=folders,
-            items=items,
-            scan_status="completed",
-        )
+            # Recursively collect folders and files from JSON tree
+            folders: List[ScannedFolder] = []
+            items: List[ScannedFile] = []
+            self._collect_tree(data, resolved_path, folders, items, parent_rel="")
+
+            return FilemetaScanResult(
+                source_name=source_name,
+                source_path=source_path,
+                canonical_uri=canonical_uri,
+                folders=folders,
+                items=items,
+                scan_status="completed",
+            )
+
+        # External command not found; check if fallback is allowed
+        if not self.allow_builtin_fallback:
+            raise FilemetaNotFoundError(
+                f"Command '{self.command}' not found. "
+                "Please verify that filemeta is installed and in your PATH."
+            )
+
+        # Built-in pure-Python scanner fallback
+        return self.scan_folder_builtin(resolved_path)
+
 
     def _collect_tree(
         self,

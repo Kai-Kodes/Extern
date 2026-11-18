@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "todo-cli"
-version = "0.1.0"
-description = "A local-first Todo CLI application with Filemeta integration"
+version = "0.2.0"
+description = "A standalone, self-contained Todo CLI application with native Dropbox sync, Telegram courses, and media chunking"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
@@ -14,15 +14,14 @@ authors = [
 dependencies = [
     "rich>=13.0.0",
     "click>=8.0.0",
-]
-
-[project.optional-dependencies]
-full = [
     "telethon>=1.24.0",
     "yt-dlp>=2023.0.0",
+    "dropbox>=11.36.0",
+    "tinytag>=1.10.0",
 ]
 
 [project.scripts]
+extern = "todo.cli:main"
 todo = "todo.cli:main"
 
 [tool.setuptools.packages.find]

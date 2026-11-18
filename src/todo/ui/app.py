@@ -2,7 +2,7 @@
 
 import sys
 from datetime import datetime
-from typing import Callable, List, Optional, Set
+from typing import Any, Callable, List, Optional, Set
 
 from todo.config import Config
 from todo.database import Database
@@ -47,9 +47,13 @@ class TodoApp:
         self,
         config: Optional[Config] = None,
         date_provider: Optional[Callable[[], datetime]] = None,
+        sync_service: Optional[Any] = None,
+        no_sync: bool = False,
     ):
         self.config = config or Config.load()
         self.date_provider = date_provider
+        self.sync_service = sync_service
+        self.no_sync = no_sync
         self.db = Database(self.config.db_path)
         self.source_service = SourceService(self.db, date_provider=self.date_provider)
         self.task_service = TaskService(self.db, date_provider=self.date_provider)
@@ -141,6 +145,8 @@ class TodoApp:
         finally:
             self.telegram_adapter.disconnect()
             self.db.close()
+            if self.sync_service and not self.no_sync:
+                self.sync_service.push()
 
     def _main_loop(self) -> None:
         status_msg: Optional[str] = None
@@ -339,6 +345,11 @@ class TodoApp:
                         continue
 
                     if choice.lower() in ("t", "tg", "telegram"):
+                        avail, err = self.telegram_adapter.check_availability()
+                        if not avail:
+                            status_msg = "Telegram not authenticated. Run 'extern auth telegram' in terminal."
+                            status_style = "yellow"
+                            continue
                         self.telegram_view.run()
                         continue
 
@@ -433,6 +444,11 @@ class TodoApp:
                 return None
 
             elif choice in ("2", "t", "tg"):
+                avail, err = self.telegram_adapter.check_availability()
+                if not avail:
+                    status_msg = "Telegram not authenticated. Run 'extern auth telegram' in terminal."
+                    status_style = "yellow"
+                    continue
                 self.telegram_view.run()
                 return None
 

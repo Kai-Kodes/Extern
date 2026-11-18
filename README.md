@@ -1,112 +1,102 @@
-# Todo CLI
+# Extern
 
-A fast, local-first, terminal-based personal task-management and course tracking system for Linux.
+A fast, local-first, terminal-based personal task-management and course tracking system for Linux, macOS, and Android (Termux).
 
-Built with Python, Click, Rich, SQLite, and Telethon. Designed to be visually quiet, responsive, keyboard-driven, and distraction-free.
+Built with Python, Click, Rich, SQLite, Telethon, and the Dropbox SDK. Designed to be standalone, visually quiet, responsive, keyboard-driven, and distraction-free.
 
 ---
 
 ## Highlights
 
 - **Today's Dashboard**: Full-screen alternate-screen terminal interface showing tasks scheduled specifically for today, responsive progress tracking (`42% · 5/12`), and instant arrow/numeric navigation.
-- **Strict Global Silence**: Zero transient status banners or toast chatter on routine actions. Toggle, delete, schedule, and navigate cleanly; only genuine errors are highlighted in red.
-- **Chunky Tasks & Presets**: Consume large videos and books in manageable contiguous chunks with interval tracking (`00:20:00–00:40:00`), customizable presets, and "Entire remaining resource" options.
+- **Strict Global Silence**: Zero transient status banners or toast chatter on routine actions. Toggle, delete, schedule, and navigate cleanly; only genuine errors are highlighted.
+- **Native Dropbox Synchronization**: Built-in Python sync engine using the official Dropbox SDK. Automatically pulls before startup and checkpoints SQLite WAL + pushes on exit. No `rclone`, cron jobs, or bash wrappers required.
+- **Native Built-In Course Scanner**: Pure-Python recursive directory scanner with `tinytag` audio/video duration extraction and natural alphanumeric sorting. External `filemeta` CLI is completely optional.
+- **Native Telegram & YouTube Integration**: Browse course channels and YouTube playlists directly inside the TUI. Interactive terminal login (`extern auth telegram`) saves sessions automatically to `~/.local/share/todo/telegram.session`.
+- **Chunky Tasks & Presets**: Break large media lessons and books into manageable contiguous chunks (`00:20:00–00:40:00`) with gap coverage calculation, custom duration presets, and "Entire remaining resource" support.
 - **Pomodoro Timer**: Integrated interval focus timer with configurable work/break cycles, audio cues, and background timer ticking.
-- **Timeline View**: Historical completion calendar and future day scheduling with day-by-day task inspection.
-- **Universal Task Master List**: Maintain a reusable backlog of tasks independent of any date. Schedule universal tasks to Today without duplicating underlying records.
-- **Filemeta Course Integration**: Import local course directories via `filemeta`. Extracts titles, durations, and page counts directly from media metadata without manual typing.
-- **Native Telegram & YouTube Integration**: Browse course channels and YouTube playlists directly inside the TUI. Import video lessons into your local library, track completion, and schedule daily study sessions.
-- **Cross-Device Client Mode (Termux / Android / Linux)**: Fully functional without mandatory scrapers or external binaries. Browse, toggle, and schedule cached items on mobile; optional tools (`telethon`, `yt-dlp`, `filemeta`) are only required for active rescans or network imports.
-- **Safe SQLite Sync via rclone**: WAL checkpointing (`PRAGMA wal_checkpoint(TRUNCATE)`) on exit and dedicated `todo db-checkpoint` CLI command for clean, corruption-free syncing with Dropbox via `rclone`.
+- **Timeline & Universal Backlog**: Historical calendar view and reusable universal backlog independent of any date.
+- **System Diagnostics**: Built-in `extern doctor` checks configuration, database, scanner, and integration health in seconds.
+- **Dual CLI Aliases**: Invoke as `extern` or short alias `todo`.
 
 ---
 
-## Architecture Overview
+## Quick Installation
 
-```
-todo/
-├── pyproject.toml             # Package metadata and entry points
-├── README.md                  # Project documentation
-├── src/
-│   └── todo/
-│       ├── cli.py             # Click CLI commands & entrypoint
-│       ├── config.py          # Configuration loader (TOML & XDG standards)
-│       ├── database.py        # SQLite schema, migrations & connection pooling
-│       ├── models.py          # Data models (Source, FileItem, Task, DailyTask)
-│       ├── search.py          # Fuzzy search ranking and token matching
-│       │
-│       ├── integrations/
-│       │   ├── filemeta.py    # Filemeta CLI adapter & file tree parser
-│       │   └── telegram.py    # Telethon adapter with persistent asyncio event loop thread
-│       │
-│       ├── services/
-│       │   ├── daily_service.py   # Daily scheduling, ordering & completion toggles
-│       │   ├── source_service.py  # Source persistence, channel caching & two-way sync
-│       │   └── task_service.py    # Core task lifecycle & universal tasks
-│       │
-│       └── ui/
-│           ├── add_task_view.py   # Add task workflow router
-│           ├── app.py             # Main application loop and screen manager
-│           ├── console.py         # Rich console configuration & header rendering
-│           ├── filemeta_view.py   # Filemeta source & course lesson browser
-│           ├── key_reader.py      # Raw cbreak terminal reader & ANSI escape parser
-│           ├── manual_view.py     # Manual task input view
-│           ├── telegram_view.py   # Telegram imported library & channel picker
-│           ├── today_view.py      # Main Today tasks dashboard
-│           └── universal_view.py  # Universal task master list view
-│
-└── tests/                     # Comprehensive unit, integration, and E2E test suite
+Install directly with `pipx` (recommended) or `pip`:
+
+```bash
+# Recommended: Isolated global CLI installation
+pipx install git+https://github.com/Kai-Kodes/Extern.git
+
+# Or with pip
+pip install git+https://github.com/Kai-Kodes/Extern.git
 ```
 
----
-
-## Installation
-
-### Requirements
-
-- Python >= 3.11
-- Linux (x86_64, aarch64) or Android (Termux)
-- Optional extras: `telethon` (for Telegram), `yt-dlp` (for YouTube), `filemeta` CLI (for local directories)
-
-### Quick Install (Linux Desktop / Server)
-
-Clone the repository and install:
+To install from a local clone:
 
 ```bash
 git clone https://github.com/Kai-Kodes/Extern.git
 cd Extern
-pip install -e .
+pip install .
 ```
 
-To install optional scraper tools (`telethon` and `yt-dlp`):
+Both `extern` and `todo` commands will be available in your `PATH`.
+
+### Termux on Android
+
+Extern is fully self-contained and runs on Android via Termux:
 
 ```bash
-pip install -e ".[full]"
+# 1. Update Termux and install Python + Git
+pkg update && pkg install -y python git
+
+# 2. Install Extern directly
+pip install git+https://github.com/Kai-Kodes/Extern.git
 ```
 
-Or using [pipx](https://pypa.github.io/pipx/):
+---
+
+## Initial Setup & Authentication
+
+### 1. Link Dropbox for Automatic Cross-Device Sync
+
+Connect your Dropbox account using secure OAuth2 PKCE without copying config files:
 
 ```bash
-pipx install .
+extern auth dropbox
 ```
 
-### Termux on Android Installation
+1. Open the generated link in your browser and click **Allow**.
+2. Paste the authorization code back into the terminal.
+3. Extern securely stores your offline refresh token in `~/.config/todo/config.toml`.
 
-Extern runs in client mode on Termux without requiring external tools:
+From then on, running `extern` or `todo` automatically:
+- Pulls `/todo.db` from Dropbox before launching if a newer remote revision exists.
+- Flushes the SQLite WAL (`PRAGMA wal_checkpoint(TRUNCATE)`) and uploads back to Dropbox upon exit.
+- Operates offline gracefully without crashing if no internet connection is present.
+
+To unlink Dropbox at any time:
+```bash
+extern auth dropbox --logout
+```
+
+### 2. Link Telegram for Video Lesson Courses
+
+Connect your Telegram account interactively:
 
 ```bash
-# 1. Update packages and install Python & Git
-pkg update && pkg install -y python git rclone
-
-# 2. Clone repository
-git clone https://github.com/Kai-Kodes/Extern.git ~/Extern
-cd ~/Extern
-
-# 3. Install in editable mode
-pip install -e .
+extern auth telegram
 ```
 
-All existing task libraries, cached video metadata, and progress can be scheduled and toggled on Android without heavy scraping dependencies.
+1. Enter your `api_id` and `api_hash` (obtain from [my.telegram.org](https://my.telegram.org) under *API development tools*).
+2. Enter your phone number, the verification code sent to your Telegram app, and your 2FA password (if enabled).
+3. The session is saved to `~/.local/share/todo/telegram.session`.
+
+To log out:
+```bash
+extern auth telegram --logout
+```
 
 ---
 
@@ -117,7 +107,14 @@ All existing task libraries, cached video metadata, and progress can be schedule
 Launch the full-screen terminal interface:
 
 ```bash
+extern
+# or
 todo
+```
+
+To launch without remote syncing (offline mode):
+```bash
+extern --no-sync
 ```
 
 #### Today Dashboard Keybindings
@@ -127,7 +124,7 @@ todo
 | `↑` / `↓` | Navigate task list |
 | `Enter` | Toggle task completion |
 | `1` .. `9` | Directly toggle task #1..9 |
-| `+` | Open Add Task menu (1. Filemeta, 2. Telegram, 3. YouTube, 4. Universal, 5. Manual) |
+| `+` | Open Add Task menu (1. Local Folder, 2. Telegram, 3. YouTube, 4. Universal, 5. Manual) |
 | `c` | Open Chunky Tasks view (chunk creation, presets, and gap progress) |
 | `p` | Open Pomodoro Focus Timer |
 | `l` | Open Timeline view (calendar completion history & future planning) |
@@ -135,162 +132,121 @@ todo
 | `d` | Remove selected task from Today's schedule |
 | `m` | Move selected task to Universal backlog |
 | `u` | Open Universal task master list |
-| `f` | Open Filemeta course library |
+| `f` | Open Local Course folder library |
 | `t` | Open Telegram course library |
 | `y` | Open YouTube playlist library |
-| `q` / `Esc` | Quit cleanly (automatically truncates WAL) |
+| `q` / `Esc` | Quit cleanly (checkpoints WAL & pushes to Dropbox) |
 
 ---
 
-## Safe Cross-Device Sync (Dropbox via rclone)
+## CLI Commands
 
-To keep `todo.db` safely synced across your desktop machine and mobile Termux without SQLite WAL corruption:
-
-### 1. Checkpoint WAL State
-
-Extern automatically flushes and truncates SQLite WAL (`PRAGMA wal_checkpoint(TRUNCATE)`) on clean exit. You can also run it explicitly from the command line:
+### Tasks & Daily Scheduling
 
 ```bash
-todo db-checkpoint
+# Print tasks scheduled for today (non-interactive)
+extern today
+
+# Add task to today
+extern add "Complete Module 3 Video Lesson"
+
+# Add task to universal backlog
+extern add "Read Design Patterns Book" --universal
+
+# List all universal backlog tasks
+extern list
+
+# List imported course sources
+extern sources
+
+# Explicitly checkpoint SQLite WAL
+extern db-checkpoint
 ```
 
-### 2. Synchronization Wrapper Script (`todo-sync.sh`)
-
-Save this wrapper script on both your desktop and Termux to sync with Dropbox using `rclone`:
+### Manual Sync Control
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
+# View sync status and cached revisions
+extern sync status
 
-DB_LOCAL="${XDG_DATA_HOME:-$HOME/.local/share}/todo/todo.db"
-DB_REMOTE="dropbox:Extern/todo.db"
+# Manually pull latest database from Dropbox
+extern sync pull
 
-# 1. Pull latest database from Dropbox
-echo "Pulling latest todo.db from remote..."
-rclone copyto "$DB_REMOTE" "$DB_LOCAL"
-
-# 2. Checkpoint and run Todo
-todo db-checkpoint
-todo
-
-# 3. Checkpoint WAL into single database file before upload
-todo db-checkpoint
-
-# 4. Push updated database back to Dropbox
-echo "Pushing updated todo.db to remote..."
-rclone copyto "$DB_LOCAL" "$DB_REMOTE"
-echo "Sync complete."
+# Manually push local database to Dropbox
+extern sync push
 ```
 
-Make it executable: `chmod +x ~/bin/todo-sync.sh`. Run `todo-sync.sh` whenever you want to start a session with automatic sync.
+### System Diagnostics
 
----
-
-### Course Lesson Browsing (Filemeta & Telegram)
-
-Both Filemeta and Telegram course views share a unified interaction model:
-
-| Key | Action |
-| :--- | :--- |
-| `↑` / `↓` | Navigate lesson list |
-| `Space` | Toggle multi-select checkbox (`[x]`) |
-| `Enter` | Schedule selected lessons (or highlighted lesson) to Today |
-| `t` | Toggle completion status (`✓` / `○`) in database |
-| `n` | Jump to next unfinished lesson (with wrap-around) |
-| `/` | Live fuzzy search filtering |
-| `r` | Rescan / refresh lessons from source |
-| `d` | Remove imported source from Todo (files & Telegram untouched) |
-| `b` / `Esc` | Return to previous menu |
-
----
-
-### Telegram Course Library Workflow
-
-1. Press `t` from Today to open **Telegram Channels**.
-2. See only channels already imported into your local library.
-3. Select an imported channel with `Enter` to browse its cached lessons instantly (zero network latency).
-4. Press `+` to open the **Channel Picker**:
-   - Searches across all accessible dialogs in your Telegram session.
-   - Filter channels with `/`.
-   - Press `Enter` to import video lessons into your local SQLite library.
-   - Press `r` to refresh the discovered channel list from Telegram.
-5. Scheduled lessons display a `[Today]` badge and sync two-way with your daily tasks.
-
----
-
-### Scriptable CLI Commands
-
-Use `todo` directly in terminal scripts or shell aliases:
+Inspect your local configuration, database status, scanner availability, and integrations:
 
 ```bash
-# Display today's tasks in text format
-todo today
+extern doctor
+# or
+extern status
+```
 
-# Add a task to today's schedule
-todo add "Review operating systems assignment"
+Example diagnostic report:
 
-# Add a task to the universal master list
-todo add "Read Chapter 4 of Networking Book" --universal
+```
+EXTERN SYSTEM DIAGNOSTICS
 
-# List all universal tasks
-todo list
-
-# List imported Filemeta course sources
-todo sources
-
-# Truncate and flush SQLite WAL for clean backup/sync
-todo db-checkpoint
+  Component           Status         Details
+  Configuration       OK             ~/.config/todo/config.toml
+  SQLite Database     OK             ~/.local/share/todo/todo.db (864.0 KiB, clean)
+  Course Scanner      OK             Built-in Pure-Python scanner with TinyTag
+  YouTube (yt-dlp)    OK             yt-dlp version 2025.04.30
+  Telegram            Authenticated  Session: ~/.local/share/todo/telegram.session
+  Dropbox Sync        Linked         Online, rev 0123456789abcdef -> /todo.db
 ```
 
 ---
 
-## Configuration
+## Configuration (`config.toml`)
 
-Configuration is loaded from `~/.config/todo/config.toml` (or `$XDG_CONFIG_HOME/todo/config.toml`):
+Extern follows the XDG Base Directory specification. Configuration is loaded from `~/.config/todo/config.toml` (or `$XDG_CONFIG_HOME/todo/config.toml`):
 
 ```toml
 [general]
 db_path = "~/.local/share/todo/todo.db"
 
-[filemeta]
-command = "filemeta"
+[dropbox]
+app_key = "bcfyaam7zsvenih"
+refresh_token = "your_offline_refresh_token"
+path = "/todo.db"
+enabled = true
 
 [telegram]
 api_id = 12345678
-api_hash = "your_telegram_api_hash_here"
-session_path = "~/.config/todo/course_session"
+api_hash = "your_telegram_api_hash"
+session_path = "~/.local/share/todo/telegram.session"
+
+[filemeta]
+command = "filemeta"
+timeout = 60
+device_timeout = 300
+
+[pomodoro]
+work_sound = "/usr/share/sounds/freedesktop/stereo/complete.oga"
+break_sound = "/usr/share/sounds/freedesktop/stereo/bell.oga"
+player = "pw-play"
 ```
 
-### Environment Variables
-
-Configuration values can be overridden via environment variables:
-
-| Variable | Description |
-| :--- | :--- |
-| `TODO_DB_PATH` | Path to SQLite database file |
-| `TODO_CONFIG_PATH` | Path to custom `config.toml` |
-| `TELEGRAM_API_ID` | Telegram API ID (integer) |
-| `TELEGRAM_API_HASH` | Telegram API Hash (string) |
-| `TELEGRAM_SESSION_PATH` | Path to Telethon `.session` file |
+Environment variables take precedence over `config.toml`:
+- `TODO_DB_PATH`: Custom path to SQLite database.
+- `TODO_CONFIG_PATH`: Custom path to `config.toml`.
+- `DROPBOX_REFRESH_TOKEN`: Override Dropbox refresh token.
+- `DROPBOX_APP_KEY`: Override Dropbox app key.
+- `DROPBOX_PATH`: Override Dropbox remote path (defaults to `/todo.db`).
+- `TELEGRAM_API_ID` & `TELEGRAM_API_HASH`: Telegram credentials.
+- `TELEGRAM_SESSION_PATH`: Telegram session file location.
 
 ---
 
-## Testing
+## Development & Testing
 
-The project includes an extensive test suite covering models, database migrations, TUI key handling, ANSI parsing, Filemeta scanning, and Telegram integration (with strictly mocked network calls):
+Run the test suite with pytest:
 
 ```bash
 pytest
 ```
-
-Run with verbose output:
-
-```bash
-pytest -v
-```
-
----
-
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.

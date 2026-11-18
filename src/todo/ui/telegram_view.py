@@ -373,7 +373,11 @@ class TelegramView:
         ok, err = self._check_adapter_availability()
         if not ok:
             return self._show_error_screen(
-                "TELEGRAM NOT CONFIGURED", err or "Telegram is not available."
+                "TELEGRAM NOT AUTHENTICATED",
+                "Telegram account is not connected on this device.\n\n"
+                "Please run:\n"
+                "  extern auth telegram\n\n"
+                "from your terminal to sign in and save your session.",
             )
 
         cached_channels = self.source_service.get_cached_telegram_channels()

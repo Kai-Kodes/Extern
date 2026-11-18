@@ -51,6 +51,8 @@ venv.bak/
 # Local configurations & secrets
 *.local.toml
 config.local.toml
+config.toml
+sync_state.json
 *.env
 .env.*
 client_secret*.json

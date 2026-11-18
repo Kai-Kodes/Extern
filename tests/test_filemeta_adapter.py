@@ -79,9 +79,20 @@ def test_scan_folder_not_a_directory():
 
 
 def test_scan_folder_command_not_found():
-    adapter = FilemetaAdapter("nonexistent_command_xyz_123")
+    adapter = FilemetaAdapter("nonexistent_command_xyz_123", allow_builtin_fallback=False)
     with pytest.raises(FilemetaNotFoundError):
         adapter.scan_folder("/tmp")
+
+
+def test_scan_folder_builtin_fallback_default():
+    adapter = FilemetaAdapter("nonexistent_command_xyz_123")
+    assert adapter.check_availability() is True
+    with tempfile.TemporaryDirectory() as tmpdir:
+        (Path(tmpdir) / "01 - Lesson.mp4").write_text("dummy")
+        result = adapter.scan_folder(tmpdir)
+        assert len(result.items) == 1
+        assert result.items[0].title == "01 - Lesson"
+        assert result.items[0].type == "video"
 
 
 def test_scan_folder_malformed_json():
