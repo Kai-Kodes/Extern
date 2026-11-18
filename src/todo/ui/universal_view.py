@@ -26,12 +26,10 @@ class UniversalView:
         task_service: TaskService,
         daily_service: DailyService,
         task_editor: Optional[Any] = None,
-        sync_manager: Optional[Any] = None,
     ):
         self.task_service = task_service
         self.daily_service = daily_service
         self.task_editor = task_editor
-        self.sync_manager = sync_manager
 
     def run(
         self, select_mode: bool = True, target_date: Optional[str] = None
@@ -91,12 +89,12 @@ class UniversalView:
 
                 show_checkbox = delete_mode or bool(selected_schedule_ids)
 
-                table = Table.grid(padding=(0, 1))
+                table = Table.grid(expand=True, padding=(0, 1))
                 table.add_column("cursor", justify="right", style="cyan bold", width=2)
                 if show_checkbox:
                     table.add_column("select", justify="center", width=4)
                 table.add_column("num", justify="right", style="cyan bold", width=4)
-                table.add_column("title")
+                table.add_column("title", ratio=1, no_wrap=True, overflow="ellipsis")
 
                 for idx, t in enumerate(active_tasks):
                     cursor = "▶" if idx == selected_idx else " "

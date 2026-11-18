@@ -16,6 +16,12 @@ dependencies = [
     "click>=8.0.0",
 ]
 
+[project.optional-dependencies]
+full = [
+    "telethon>=1.24.0",
+    "yt-dlp>=2023.0.0",
+]
+
 [project.scripts]
 todo = "todo.cli:main"
 

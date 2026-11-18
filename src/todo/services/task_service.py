@@ -12,13 +12,9 @@ class TaskService:
         self,
         db: Database,
         date_provider: Optional[Callable[[], datetime]] = None,
-        google_tasks_service: Optional[Any] = None,
-        google_calendar_service: Optional[Any] = None,
     ):
         self.db = db
         self.date_provider = date_provider
-        self.google_tasks_service = google_tasks_service
-        self.google_calendar_service = google_calendar_service
 
     def get_now(self) -> datetime:
         """Return the current datetime, supporting injected test clocks."""
@@ -57,9 +53,6 @@ class TaskService:
             updated_at=now,
         )
 
-        if source_type in ("manual", "universal") and getattr(self, "google_tasks_service", None):
-            self.google_tasks_service.sync_task_created(task)
-
         return task
 
     def get_task_by_id(self, task_id: int) -> Optional[Task]:
@@ -91,24 +84,14 @@ class TaskService:
         )
 
     def get_universal_tasks(self) -> List[Task]:
-        """
-        Retrieve all universal tasks.
-        Includes user universal tasks and pending Google tasks without an active daily schedule.
-        """
+        """Retrieve all universal tasks."""
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT id, title, description, source_type, source_id, status, created_at, updated_at
                 FROM tasks
-                WHERE (source_type = 'universal')
-                   OR (
-                       source_type = 'google_tasks'
-                       AND status = 'pending'
-                       AND id NOT IN (
-                           SELECT task_id FROM daily_tasks WHERE completed_at IS NULL
-                       )
-                   )
+                WHERE source_type = 'universal'
                 ORDER BY created_at ASC
                 """
             )
@@ -299,7 +282,7 @@ class TaskService:
             conn.commit()
 
         # If linked to a FileItem, update file_items title
-        if row["source_id"] and row["source_type"] in ("filemeta", "telegram", "youtube", "google_tasks"):
+        if row["source_id"] and row["source_type"] in ("filemeta", "telegram", "youtube"):
             with self.db.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
@@ -322,16 +305,6 @@ class TaskService:
             created_at=row["created_at"],
             updated_at=now,
         )
-
-        if getattr(self, "google_tasks_service", None):
-            self.google_tasks_service.sync_task_updated(
-                updated_task,
-                title=new_title if title is not None else None,
-                notes=new_desc if description is not None else None,
-            )
-
-        if getattr(self, "google_calendar_service", None):
-            self.google_calendar_service.on_task_edited(updated_task)
 
         return updated_task
 
@@ -358,7 +331,7 @@ class TaskService:
 
         # Two-way sync: if originated from a FileItem, update its completed state
         # ONLY for whole-item tasks, NEVER for individual chunk tasks
-        if not is_chunk and row and row["source_type"] in ("filemeta", "telegram", "youtube", "google_tasks") and row["source_id"]:
+        if not is_chunk and row and row["source_type"] in ("filemeta", "telegram", "youtube") and row["source_id"]:
             from todo.services.source_service import SourceService
 
             SourceService(self.db, date_provider=self.date_provider).set_item_completion(
@@ -377,12 +350,6 @@ class TaskService:
         """
         if not task_ids:
             return 0
-
-        for t_id in task_ids:
-            if getattr(self, "google_tasks_service", None):
-                self.google_tasks_service.sync_task_deleted(t_id)
-            if getattr(self, "google_calendar_service", None):
-                self.google_calendar_service.on_task_deleted(t_id)
 
         with self.db.get_connection() as conn:
             cursor = conn.cursor()

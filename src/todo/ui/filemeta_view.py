@@ -94,13 +94,13 @@ class FilemetaView:
                 if selected_idx >= len(active_sources):
                     selected_idx = max(0, len(active_sources) - 1)
 
-                table = Table.grid(padding=(0, 1))
+                table = Table.grid(expand=True, padding=(0, 1))
                 table.add_column("cursor", justify="right", style="cyan bold", width=2)
                 if delete_mode:
                     table.add_column("select", justify="center", width=4)
                 table.add_column("num", justify="right", style="cyan bold", width=4)
-                table.add_column("name", style="bold white", width=32)
-                table.add_column("progress", style="cyan")
+                table.add_column("name", style="bold white", ratio=1, no_wrap=True, overflow="ellipsis")
+                table.add_column("progress", style="cyan", justify="right", width=18)
 
                 for idx, src in enumerate(active_sources):
                     cursor = "▶" if idx == selected_idx else " "
@@ -234,6 +234,10 @@ class FilemetaView:
                 continue
 
             if k in ("+", Key.PLUS, "add"):
+                if not self.filemeta_adapter.is_available():
+                    status_msg = "filemeta not installed on this device."
+                    status_style = "red"
+                    continue
                 err_msg, res_src = self.handle_add_folder()
                 if res_src:
                     item_ret = self.handle_source_items(
@@ -949,14 +953,14 @@ class FilemetaView:
 
                 show_checkbox = delete_mode or bool(selected_item_ids)
 
-                table = Table.grid(padding=(0, 1))
+                table = Table.grid(expand=True, padding=(0, 1))
                 table.add_column("cursor", justify="right", style="cyan bold", width=2)
                 if show_checkbox:
                     table.add_column("select", justify="center", width=4)
                 table.add_column("icon", justify="center", width=2)
                 table.add_column("num", justify="right", style="cyan bold", width=4)
-                table.add_column("title")
-                table.add_column("info", style="dim")
+                table.add_column("title", ratio=1, no_wrap=True, overflow="ellipsis")
+                table.add_column("info", style="dim", justify="right", width=16)
 
                 today_str = self.daily_service.get_today_str()
                 today_tasks = self.daily_service.get_tasks_for_date(today_str)
@@ -1283,6 +1287,11 @@ class FilemetaView:
                         status_msg = f"Cannot rescan: device is disconnected or path '{source.path}' is inaccessible."
                         status_style = "yellow"
                         continue
+
+                if not self.filemeta_adapter.is_available():
+                    status_msg = "filemeta not installed on this device."
+                    status_style = "red"
+                    continue
 
                 timeout_val = getattr(
                     self.filemeta_adapter, "get_timeout_for_path", lambda p: 60

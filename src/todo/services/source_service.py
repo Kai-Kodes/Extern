@@ -679,7 +679,7 @@ class SourceService:
             cursor.execute(
                 """
                 SELECT id FROM tasks
-                WHERE source_type IN ('filemeta', 'telegram', 'youtube', 'google_tasks')
+                WHERE source_type IN ('filemeta', 'telegram', 'youtube')
                   AND source_id = ?
                   AND id NOT IN (SELECT task_id FROM chunky_tasks)
                 """,

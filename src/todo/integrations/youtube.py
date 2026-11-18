@@ -181,6 +181,10 @@ class YouTubeAdapter:
         self.yt_dlp_command = yt_dlp_command
         self.format_selector = format_selector
 
+    def is_available(self) -> bool:
+        """Return True if yt-dlp binary is found on PATH."""
+        return shutil.which(self.yt_dlp_command) is not None
+
     def _check_binary(self) -> None:
         if not shutil.which(self.yt_dlp_command):
             raise YouTubeNotFoundError(

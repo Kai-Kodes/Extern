@@ -26,13 +26,9 @@ class TaskEditor:
         self,
         task_service: TaskService,
         daily_service: DailyService,
-        google_tasks_service: Optional[Any] = None,
-        google_calendar_service: Optional[Any] = None,
     ):
         self.task_service = task_service
         self.daily_service = daily_service
-        self.google_tasks_service = google_tasks_service
-        self.google_calendar_service = google_calendar_service
 
     def edit_task(
         self,
@@ -461,34 +457,18 @@ class TaskEditor:
         desc_changed = (description != initial_desc)
         date_changed = (clean_date != initial_date)
 
-        # Check if Google Tasks service should handle cloud sync
-        is_google = (task.source_type == "google_tasks")
-        if is_google and self.google_tasks_service:
-            clear_due = (clean_date is None and initial_date is not None)
-            new_due = clean_date if date_changed else None
-            try:
-                self.google_tasks_service.update_task(
-                    task_id=task.id,
-                    title=clean_title if title_changed else None,
-                    notes=description if desc_changed else None,
-                    due_date=new_due,
-                    clear_due=clear_due,
-                )
-            except Exception as e:
-                return False, f"Google Tasks update failed: {e}"
-        else:
-            # Update local task only for modified fields
-            if title_changed or desc_changed:
-                self.task_service.update_task(
-                    task_id=task.id,
-                    title=clean_title if title_changed else None,
-                    description=description if desc_changed else None,
-                )
-            # Update schedule only if date changed
-            if date_changed:
-                if clean_date is None:
-                    self.daily_service.unschedule_task(task.id)
-                else:
-                    self.daily_service.reschedule_task(task.id, clean_date)
+        # Update local task only for modified fields
+        if title_changed or desc_changed:
+            self.task_service.update_task(
+                task_id=task.id,
+                title=clean_title if title_changed else None,
+                description=description if desc_changed else None,
+            )
+        # Update schedule only if date changed
+        if date_changed:
+            if clean_date is None:
+                self.daily_service.unschedule_task(task.id)
+            else:
+                self.daily_service.reschedule_task(task.id, clean_date)
 
         return True, None

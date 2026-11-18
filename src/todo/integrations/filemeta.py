@@ -250,6 +250,10 @@ class FilemetaAdapter:
         """Check if the configured filemeta command is accessible in PATH."""
         return shutil.which(self.command) is not None
 
+    def is_available(self) -> bool:
+        """Check if the configured filemeta command is accessible in PATH."""
+        return self.check_availability()
+
     def scan_folder(
         self,
         folder_path: str | Path,

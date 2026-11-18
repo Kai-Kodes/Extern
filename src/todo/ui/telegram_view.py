@@ -44,6 +44,16 @@ class TelegramView:
         self.task_service = task_service
         self.daily_service = daily_service
 
+    def _check_adapter_availability(self) -> Tuple[bool, Optional[str]]:
+        """Safely check adapter availability, handling real adapter, custom subclasses, and mocks."""
+        try:
+            avail = getattr(self.adapter, "check_availability", lambda: (True, None))()
+            if isinstance(avail, tuple) and len(avail) >= 2:
+                return bool(avail[0]), avail[1]
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
     def run(self, select_item_mode: bool = False) -> Any:
         """
         Telegram home screen: displays channels already imported into Todo's SQLite database.
@@ -98,13 +108,13 @@ class TelegramView:
                 if selected_idx >= len(active_sources):
                     selected_idx = max(0, len(active_sources) - 1)
 
-                table = Table.grid(padding=(0, 1))
+                table = Table.grid(expand=True, padding=(0, 1))
                 table.add_column("cursor", justify="right", style="cyan bold", width=2)
                 if delete_mode:
                     table.add_column("select", justify="center", width=4)
                 table.add_column("num", justify="right", style="cyan bold", width=4)
-                table.add_column("name", style="bold white", width=32)
-                table.add_column("progress", style="cyan")
+                table.add_column("name", style="bold white", ratio=1, no_wrap=True, overflow="ellipsis")
+                table.add_column("progress", style="cyan", justify="right", width=18)
 
                 for idx, src in enumerate(active_sources):
                     cursor = "▶" if idx == selected_idx else " "
@@ -231,6 +241,10 @@ class TelegramView:
 
             # +: Open channel picker to discover and import a Telegram channel
             if k in ("+", Key.PLUS, "add"):
+                ok, err = self._check_adapter_availability()
+                if not ok:
+                    status_msg = err or "Telegram client not configured on this device."
+                    continue
                 add_ret = self.handle_add_channel(select_item_mode=select_item_mode)
                 if select_item_mode and add_ret:
                     return add_ret
@@ -356,7 +370,7 @@ class TelegramView:
         Channel picker: discover, search, and import Telegram channels into Todo.
         Uses locally cached Telegram channels list; refreshes only on explicit 'r'.
         """
-        ok, err = self.adapter.check_availability()
+        ok, err = self._check_adapter_availability()
         if not ok:
             return self._show_error_screen(
                 "TELEGRAM NOT CONFIGURED", err or "Telegram is not available."
@@ -511,6 +525,10 @@ class TelegramView:
 
             # r: Refresh channels list from Telegram
             if k in ("r", "refresh"):
+                ok, err = self._check_adapter_availability()
+                if not ok:
+                    status_msg = err or "Telegram client not configured on this device."
+                    continue
                 with console.status(
                     "[bold cyan]Refreshing Telegram channels...[/bold cyan]", spinner="dots"
                 ):
@@ -757,14 +775,14 @@ class TelegramView:
 
                 show_checkbox = delete_mode or bool(selected_item_ids)
 
-                table = Table.grid(padding=(0, 1))
+                table = Table.grid(expand=True, padding=(0, 1))
                 table.add_column("cursor", justify="right", style="cyan bold", width=2)
                 if show_checkbox:
                     table.add_column("select", justify="center", width=4)
                 table.add_column("icon", justify="center", width=2)
                 table.add_column("num", justify="right", style="cyan bold", width=4)
-                table.add_column("title")
-                table.add_column("info", style="dim")
+                table.add_column("title", ratio=1, no_wrap=True, overflow="ellipsis")
+                table.add_column("info", style="dim", justify="right", width=16)
 
                 for i, it in enumerate(visible_slice):
                     actual_i = scroll_offset + i
@@ -991,6 +1009,10 @@ class TelegramView:
 
             # r: Rescan channel messages from Telegram
             if k in ("r", "rescan"):
+                ok, err = self._check_adapter_availability()
+                if not ok:
+                    status_msg = err or "Telegram client not configured on this device."
+                    continue
                 with console.status(
                     f"[bold cyan]Rescanning lessons for {channel_title}...[/bold cyan]",
                     spinner="dots",

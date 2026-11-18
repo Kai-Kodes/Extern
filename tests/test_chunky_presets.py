@@ -287,17 +287,16 @@ def test_existing_configuration_compatibility(tmp_path: Path):
 [general]
 db_path = "todo.db"
 
-[google_tasks]
-enabled = true
-default_list = "@default"
+[telegram]
+api_id = "12345"
 """)
     # Load config and verify it parses cleanly without error
     import os
     os.environ["TODO_CONFIG_PATH"] = str(config_file)
     try:
         cfg = Config.load()
-        assert cfg.google_tasks_enabled is True
-        assert cfg.google_default_task_list == "@default"
+        assert cfg.db_path.name == "todo.db"
+        assert str(cfg.telegram_api_id) == "12345"
     finally:
         os.environ.pop("TODO_CONFIG_PATH", None)
 

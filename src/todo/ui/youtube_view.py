@@ -100,13 +100,13 @@ class YouTubeView:
                 if selected_idx >= len(active_sources):
                     selected_idx = max(0, len(active_sources) - 1)
 
-                table = Table.grid(padding=(0, 1))
+                table = Table.grid(expand=True, padding=(0, 1))
                 table.add_column("cursor", justify="right", style="cyan bold", width=2)
                 if delete_mode:
                     table.add_column("select", justify="center", width=4)
                 table.add_column("num", justify="right", style="cyan bold", width=4)
-                table.add_column("name", style="bold white", width=36)
-                table.add_column("progress", style="cyan")
+                table.add_column("name", style="bold white", ratio=1, no_wrap=True, overflow="ellipsis")
+                table.add_column("progress", style="cyan", justify="right", width=18)
 
                 for idx, src in enumerate(active_sources):
                     cursor = "▶" if idx == selected_idx else " "
@@ -233,6 +233,9 @@ class YouTubeView:
 
             # +: Add video task or import playlist
             if k in ("+", Key.PLUS, "add"):
+                if not self.adapter.is_available():
+                    status_msg = "yt-dlp not installed on this device."
+                    continue
                 ret = self.handle_add_url(select_item_mode=select_item_mode)
                 if select_item_mode and ret:
                     return ret
@@ -257,6 +260,9 @@ class YouTubeView:
                         return "added"
                     continue
                 elif not search.is_active and not search.query:
+                    if not self.adapter.is_available():
+                        status_msg = "yt-dlp not installed on this device."
+                        continue
                     ret = self.handle_add_url(select_item_mode=select_item_mode)
                     if select_item_mode and ret:
                         return ret
@@ -556,14 +562,14 @@ class YouTubeView:
 
                 show_checkbox = delete_mode or bool(selected_item_ids)
 
-                table = Table.grid(padding=(0, 1))
+                table = Table.grid(expand=True, padding=(0, 1))
                 table.add_column("cursor", justify="right", style="cyan bold", width=2)
                 if show_checkbox:
                     table.add_column("select", justify="center", width=4)
                 table.add_column("icon", justify="center", width=2)
                 table.add_column("num", justify="right", style="cyan bold", width=4)
-                table.add_column("title")
-                table.add_column("info", style="dim")
+                table.add_column("title", ratio=1, no_wrap=True, overflow="ellipsis")
+                table.add_column("info", style="dim", justify="right", width=16)
 
                 for i, it in enumerate(visible_slice):
                     actual_i = scroll_offset + i
@@ -818,6 +824,9 @@ class YouTubeView:
 
     def _rescan_playlist(self, source: Source) -> tuple[Source, Optional[str]]:
         """Rescan playlist metadata while preserving completion and scheduling state."""
+        if not self.adapter.is_available():
+            return source, "yt-dlp not installed on this device."
+
         playlist_id = source.path.replace("youtube://playlist/", "")
         canonical_url = f"https://www.youtube.com/playlist?list={playlist_id}"
 

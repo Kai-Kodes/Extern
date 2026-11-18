@@ -104,62 +104,6 @@ CREATE TABLE IF NOT EXISTS pomodoro_state (
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS google_task_lists_cache (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    updated TEXT,
-    etag TEXT,
-    cached_at TEXT,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS google_calendars_cache (
-    id TEXT PRIMARY KEY,
-    summary TEXT NOT NULL,
-    description TEXT,
-    time_zone TEXT,
-    access_role TEXT,
-    primary_calendar INTEGER NOT NULL DEFAULT 0,
-    cached_at TEXT,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS google_calendar_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    calendar_id TEXT NOT NULL,
-    event_id TEXT NOT NULL,
-    summary TEXT,
-    start_date TEXT NOT NULL,
-    end_date TEXT NOT NULL,
-    etag TEXT,
-    html_link TEXT,
-    status TEXT NOT NULL DEFAULT 'confirmed',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(task_id, calendar_id)
-);
-
-CREATE TABLE IF NOT EXISTS task_google_tasks_map (
-    task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
-    list_id TEXT NOT NULL,
-    remote_id TEXT NOT NULL,
-    etag TEXT,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS google_tasks_outbox (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id INTEGER,
-    action TEXT NOT NULL,
-    payload TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    target TEXT NOT NULL DEFAULT 'tasks',
-    retry_count INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
-    locked_until REAL DEFAULT 0.0
-);
-
 CREATE TABLE IF NOT EXISTS chunky_resources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     file_item_id INTEGER REFERENCES file_items(id) ON DELETE CASCADE,
@@ -228,13 +172,6 @@ CREATE INDEX IF NOT EXISTS idx_tasks_source ON tasks(source_type, source_id);
 CREATE INDEX IF NOT EXISTS idx_daily_tasks_date ON daily_tasks(date);
 CREATE INDEX IF NOT EXISTS idx_daily_tasks_completed_at ON daily_tasks(completed_at);
 CREATE INDEX IF NOT EXISTS idx_telegram_cache_title ON telegram_channels_cache(title);
-CREATE INDEX IF NOT EXISTS idx_google_task_lists_cache_title ON google_task_lists_cache(title);
-CREATE INDEX IF NOT EXISTS idx_google_calendars_cache_summary ON google_calendars_cache(summary);
-CREATE INDEX IF NOT EXISTS idx_gcal_events_task ON google_calendar_events(task_id);
-CREATE INDEX IF NOT EXISTS idx_gcal_events_event ON google_calendar_events(calendar_id, event_id);
-CREATE INDEX IF NOT EXISTS idx_task_gt_map_remote ON task_google_tasks_map(list_id, remote_id);
-CREATE INDEX IF NOT EXISTS idx_google_tasks_outbox_created ON google_tasks_outbox(created_at);
-CREATE INDEX IF NOT EXISTS idx_google_tasks_outbox_target ON google_tasks_outbox(target, created_at);
 CREATE INDEX IF NOT EXISTS idx_pomodoro_presets_name ON pomodoro_presets(name);
 CREATE INDEX IF NOT EXISTS idx_chunky_resources_uri ON chunky_resources(canonical_uri);
 CREATE INDEX IF NOT EXISTS idx_chunky_resources_item ON chunky_resources(file_item_id);
@@ -262,8 +199,20 @@ class Database:
         conn = sqlite3.connect(str(self.db_path), timeout=15.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
-        conn.execute("PRAGMA busy_timeout = 15000;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
         return conn
+
+    def checkpoint(self) -> None:
+        """Execute PRAGMA wal_checkpoint(TRUNCATE) to flush all WAL changes into the database file and truncate WAL/SHM."""
+        with self.get_connection() as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+
+    def close(self) -> None:
+        """Safely checkpoint and close the database connection state."""
+        try:
+            self.checkpoint()
+        except Exception:
+            pass
 
     def init_db(self) -> None:
         """Initialize the database schema, apply necessary column migrations, and create indexes."""
@@ -310,124 +259,6 @@ class Database:
             dt_columns = {row["name"] for row in cursor.fetchall()}
             if "completed_at" not in dt_columns:
                 cursor.execute("ALTER TABLE daily_tasks ADD COLUMN completed_at TEXT")
-
-            # Migration check for google_task_lists_cache
-            cursor.execute("PRAGMA table_info(google_task_lists_cache)")
-            gtc_columns = {row["name"] for row in cursor.fetchall()}
-            if "updated" not in gtc_columns:
-                cursor.execute("ALTER TABLE google_task_lists_cache ADD COLUMN updated TEXT")
-            if "etag" not in gtc_columns:
-                cursor.execute("ALTER TABLE google_task_lists_cache ADD COLUMN etag TEXT")
-            if "cached_at" not in gtc_columns:
-                cursor.execute("ALTER TABLE google_task_lists_cache ADD COLUMN cached_at TEXT")
-
-            # Ensure google_tasks_outbox table exists and has updated columns
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS google_tasks_outbox (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    task_id INTEGER,
-                    action TEXT NOT NULL,
-                    payload TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL,
-                    target TEXT NOT NULL DEFAULT 'tasks',
-                    retry_count INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    locked_until REAL DEFAULT 0.0
-                )
-                """
-            )
-            cursor.execute("PRAGMA table_info(google_tasks_outbox)")
-            gto_columns = {row["name"] for row in cursor.fetchall()}
-            if "target" not in gto_columns:
-                cursor.execute("ALTER TABLE google_tasks_outbox ADD COLUMN target TEXT NOT NULL DEFAULT 'tasks'")
-            if "retry_count" not in gto_columns:
-                cursor.execute("ALTER TABLE google_tasks_outbox ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
-            if "last_error" not in gto_columns:
-                cursor.execute("ALTER TABLE google_tasks_outbox ADD COLUMN last_error TEXT")
-            if "locked_until" not in gto_columns:
-                cursor.execute("ALTER TABLE google_tasks_outbox ADD COLUMN locked_until REAL DEFAULT 0.0")
-
-            # Ensure task_google_tasks_map table exists
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS task_google_tasks_map (
-                    task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
-                    list_id TEXT NOT NULL,
-                    remote_id TEXT NOT NULL,
-                    etag TEXT,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-
-            # Ensure google_calendar_events and google_calendars_cache tables exist
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS google_calendars_cache (
-                    id TEXT PRIMARY KEY,
-                    summary TEXT NOT NULL,
-                    description TEXT,
-                    time_zone TEXT,
-                    access_role TEXT,
-                    primary_calendar INTEGER NOT NULL DEFAULT 0,
-                    cached_at TEXT,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS google_calendar_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-                    calendar_id TEXT NOT NULL,
-                    event_id TEXT NOT NULL,
-                    summary TEXT,
-                    start_date TEXT NOT NULL,
-                    end_date TEXT NOT NULL,
-                    etag TEXT,
-                    html_link TEXT,
-                    status TEXT NOT NULL DEFAULT 'confirmed',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(task_id, calendar_id)
-                )
-                """
-            )
-
-            # Backfill task_google_tasks_map from existing Google Tasks
-            cursor.execute(
-                """
-                INSERT OR IGNORE INTO task_google_tasks_map (task_id, list_id, remote_id, etag, updated_at)
-                SELECT t.id,
-                       COALESCE(json_extract(fi.metadata, '$.list_id'), '@default'),
-                       fi.path,
-                       COALESCE(json_extract(fi.metadata, '$.etag'), ''),
-                       t.updated_at
-                FROM tasks t
-                JOIN file_items fi ON t.source_id = fi.id
-                WHERE t.source_type = 'google_tasks'
-                  AND fi.path IS NOT NULL
-                  AND NOT fi.path LIKE 'local_%'
-                  AND NOT EXISTS (
-                      SELECT 1 FROM task_google_tasks_map m
-                      WHERE m.remote_id = fi.path AND m.task_id != t.id
-                  )
-                """
-            )
-
-            # Safely create unique index if no duplicates violate it
-            try:
-                cursor.execute(
-                    """
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_gt_map_unique_remote
-                    ON task_google_tasks_map(list_id, remote_id)
-                    WHERE NOT remote_id LIKE 'local_%'
-                    """
-                )
-            except sqlite3.IntegrityError:
-                pass
 
             # Ensure chunky tables exist
             cursor.execute(
@@ -561,159 +392,3 @@ class Database:
 
             conn.commit()
 
-    def reconcile_duplicate_echoes(self, conn: Optional[sqlite3.Connection] = None) -> List[Dict[str, Any]]:
-        """
-        Safely reconcile spurious duplicate task echoes created when a local manual/universal
-        task was synced to Google Tasks and then re-imported as a google_tasks item.
-
-        Preserves original task ID, title, creation history, daily scheduling, completion state,
-        notes, outbox entries, calendar event associations, and remote task mapping.
-
-        Returns a list of reconciled duplicate summaries.
-        """
-        should_close = False
-        if conn is None:
-            conn = self.get_connection()
-            should_close = True
-
-        reconciled: List[Dict[str, Any]] = []
-        try:
-            cursor = conn.cursor()
-
-            # 1. Detect echoes where an original manual/universal task shares the same remote_id with a google_tasks item
-            cursor.execute(
-                """
-                SELECT 
-                    t1.id AS original_id,
-                    t1.title AS original_title,
-                    t1.description AS original_desc,
-                    t1.status AS original_status,
-                    t1.source_type AS original_source,
-                    t1.created_at AS original_created_at,
-                    m.remote_id,
-                    m.list_id,
-                    t2.id AS echo_id,
-                    t2.title AS echo_title,
-                    t2.description AS echo_desc,
-                    t2.status AS echo_status,
-                    t2.created_at AS echo_created_at,
-                    fi.id AS echo_fi_id
-                FROM task_google_tasks_map m
-                JOIN tasks t1 ON t1.id = m.task_id
-                JOIN file_items fi ON fi.path = m.remote_id
-                JOIN tasks t2 ON t2.source_id = fi.id
-                WHERE t1.id != t2.id
-                  AND t1.source_type IN ('manual', 'universal')
-                  AND t2.source_type = 'google_tasks'
-                  AND t1.title = t2.title
-                  AND NOT m.remote_id LIKE 'local_%'
-                ORDER BY t1.id ASC
-                """
-            )
-            echoes = [dict(r) for r in cursor.fetchall()]
-
-            for echo in echoes:
-                orig_id = echo["original_id"]
-                echo_id = echo["echo_id"]
-                echo_fi_id = echo["echo_fi_id"]
-
-                # A. Merge completion status if echo was completed
-                if echo["echo_status"] == "completed" and echo["original_status"] != "completed":
-                    cursor.execute(
-                        "UPDATE tasks SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                        (orig_id,),
-                    )
-                    cursor.execute(
-                        "SELECT completed_at FROM daily_tasks WHERE task_id = ? AND completed_at IS NOT NULL LIMIT 1",
-                        (echo_id,),
-                    )
-                    dt_completed = cursor.fetchone()
-                    if dt_completed:
-                        cursor.execute(
-                            "UPDATE daily_tasks SET completed_at = ? WHERE task_id = ? AND completed_at IS NULL",
-                            (dt_completed["completed_at"], orig_id),
-                        )
-
-                # B. Merge description/notes if original was empty
-                if echo["echo_desc"] and not echo["original_desc"]:
-                    cursor.execute(
-                        "UPDATE tasks SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                        (echo["echo_desc"], orig_id),
-                    )
-
-                # C. Handle daily_tasks scheduling
-                cursor.execute("SELECT id, date FROM daily_tasks WHERE task_id = ?", (orig_id,))
-                orig_daily = cursor.fetchall()
-                cursor.execute("SELECT id, date, position, completed_at FROM daily_tasks WHERE task_id = ?", (echo_id,))
-                echo_daily = cursor.fetchall()
-
-                if not orig_daily and echo_daily:
-                    cursor.execute("UPDATE daily_tasks SET task_id = ? WHERE task_id = ?", (orig_id, echo_id))
-                else:
-                    cursor.execute("DELETE FROM daily_tasks WHERE task_id = ?", (echo_id,))
-
-                # D. Consolidate dependent outbox, calendar, pomodoro associations
-                cursor.execute("UPDATE OR IGNORE google_tasks_outbox SET task_id = ? WHERE task_id = ?", (orig_id, echo_id))
-                cursor.execute("DELETE FROM google_tasks_outbox WHERE task_id = ?", (echo_id,))
-
-                cursor.execute("UPDATE OR IGNORE google_calendar_events SET task_id = ? WHERE task_id = ?", (orig_id, echo_id))
-                cursor.execute("DELETE FROM google_calendar_events WHERE task_id = ?", (echo_id,))
-
-                cursor.execute("DELETE FROM task_google_tasks_map WHERE task_id = ?", (echo_id,))
-
-                # E. Delete spurious echo task and linked file_item
-                cursor.execute("DELETE FROM tasks WHERE id = ?", (echo_id,))
-                if echo_fi_id:
-                    cursor.execute("DELETE FROM file_items WHERE id = ?", (echo_fi_id,))
-
-                reconciled.append({
-                    "original_id": orig_id,
-                    "echo_id": echo_id,
-                    "title": echo["original_title"],
-                    "remote_id": echo["remote_id"],
-                    "list_id": echo["list_id"],
-                })
-
-            # 2. Check for duplicate mappings in task_google_tasks_map sharing same remote_id
-            cursor.execute(
-                """
-                SELECT m1.task_id AS orig_id, m2.task_id AS echo_id, m1.remote_id, m1.list_id
-                FROM task_google_tasks_map m1
-                JOIN task_google_tasks_map m2 ON m1.remote_id = m2.remote_id AND m1.task_id < m2.task_id
-                WHERE NOT m1.remote_id LIKE 'local_%'
-                """
-            )
-            dup_maps = [dict(r) for r in cursor.fetchall()]
-            for dm in dup_maps:
-                cursor.execute("SELECT id, source_type, source_id, title FROM tasks WHERE id = ?", (dm["echo_id"],))
-                echo_task = cursor.fetchone()
-                if echo_task and echo_task["source_type"] == "google_tasks":
-                    cursor.execute("DELETE FROM task_google_tasks_map WHERE task_id = ?", (dm["echo_id"],))
-                    cursor.execute("DELETE FROM daily_tasks WHERE task_id = ?", (dm["echo_id"],))
-                    cursor.execute("DELETE FROM tasks WHERE id = ?", (dm["echo_id"],))
-                    if echo_task["source_id"]:
-                        cursor.execute("DELETE FROM file_items WHERE id = ?", (echo_task["source_id"],))
-                    reconciled.append({
-                        "original_id": dm["orig_id"],
-                        "echo_id": dm["echo_id"],
-                        "title": echo_task["title"],
-                        "remote_id": dm["remote_id"],
-                        "list_id": dm["list_id"],
-                    })
-
-            try:
-                cursor.execute(
-                    """
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_gt_map_unique_remote
-                    ON task_google_tasks_map(list_id, remote_id)
-                    WHERE NOT remote_id LIKE 'local_%'
-                    """
-                )
-            except sqlite3.IntegrityError:
-                pass
-
-            conn.commit()
-            return reconciled
-        finally:
-            if should_close:
-                conn.close()

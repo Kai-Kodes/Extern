@@ -209,9 +209,6 @@ def test_key_binding_shift_plus_and_c_in_app():
          patch("todo.ui.app.SourceService"), \
          patch("todo.ui.app.TaskService"), \
          patch("todo.ui.app.DailyService"), \
-         patch("todo.ui.app.GoogleTasksSyncManager"), \
-         patch("todo.ui.app.GoogleTasksService"), \
-         patch("todo.ui.app.GoogleCalendarService"), \
          patch("todo.ui.app.FilemetaAdapter"), \
          patch("todo.ui.app.TelegramAdapter"), \
          patch("todo.ui.app.YouTubeAdapter"):
@@ -221,8 +218,6 @@ def test_key_binding_shift_plus_and_c_in_app():
         app.daily_service.get_progress_for_date.return_value = (0, 0, 0)
         app.daily_service.get_active_tasks_for_date.return_value = []
         app.daily_service.get_today_str.return_value = "2026-10-23"
-        app.google_tasks_sync_manager.change_version = 1
-        app.google_tasks_sync_manager.get_status_text.return_value = "Connected"
 
         # Mock read_key loop for test
         with patch("todo.ui.app.read_key", side_effect=["c", "C", Key.SHIFT_PLUS, "+", Key.ESCAPE]):

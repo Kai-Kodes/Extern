@@ -39,7 +39,6 @@ class TodayView:
         total_count: Optional[int] = None,
         selected_ids: Optional[Set[int]] = None,
         mode: Optional[str] = None,
-        sync_status: Optional[str] = None,
     ) -> None:
         """Render the Today screen within the TUI viewport."""
         if clear:
@@ -70,26 +69,24 @@ class TodayView:
 
         if not tasks:
             console.print("  [dim italic]No tasks scheduled for today.[/dim italic]\n")
-            g_hint = "Google (Auth)" if sync_status and "Auth Needed" in sync_status else "Google"
             hints = [
                 ("+", "Add task"),
                 ("c", "Chunky task"),
                 ("l", "Timeline"),
                 ("u", "Universal tasks"),
                 ("p", "Pomodoro"),
-                ("g", g_hint),
                 ("q", "Quit"),
             ]
             render_footer(hints)
         else:
-            table = Table.grid(padding=(0, 1))
+            table = Table.grid(expand=True, padding=(0, 1))
             table.add_column("cursor", justify="right", style="cyan bold", width=2)
             show_checkboxes = bool(mode or sel_set)
             if show_checkboxes:
                 table.add_column("select", justify="center", width=4)
             table.add_column("num", justify="right", style="cyan bold", width=4)
             table.add_column("icon", justify="center", width=3)
-            table.add_column("title")
+            table.add_column("title", ratio=1, no_wrap=True, overflow="ellipsis")
 
             for idx, dt in enumerate(tasks):
                 task_title = dt.task.title if dt.task else f"Task #{dt.task_id}"
@@ -138,7 +135,6 @@ class TodayView:
                     ("q", "Quit"),
                 ]
             else:
-                g_hint = "Google (Auth)" if sync_status and "Auth Needed" in sync_status else "Google"
                 hints = [
                     ("↑/↓", "Navigate"),
                     ("Enter", "Toggle"),
@@ -150,7 +146,6 @@ class TodayView:
                     ("m", "Move to Universal"),
                     ("u", "Universal"),
                     ("p", "Pomodoro"),
-                    ("g", g_hint),
                     ("q", "Quit"),
                 ]
             render_footer(hints)
@@ -247,8 +242,8 @@ class TodayView:
                 return None
             return None
 
-        # 2. Filemeta / Telegram / YouTube / Google Tasks deletion semantics
-        elif task and task.source_type in ("filemeta", "telegram", "youtube", "google_tasks"):
+        # 2. Filemeta / Telegram / YouTube source deletion semantics
+        elif task and task.source_type in ("filemeta", "telegram", "youtube"):
             clear_viewport()
             render_header("REMOVE FROM TODAY", subtitle=title)
             console.print(

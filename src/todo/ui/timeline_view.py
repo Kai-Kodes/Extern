@@ -29,14 +29,12 @@ class TimelineView:
         add_task_menu_fn: Optional[Callable[[Optional[str]], None]] = None,
         date_provider: Optional[Callable[[], datetime]] = None,
         task_editor: Optional[Any] = None,
-        sync_manager: Optional[Any] = None,
     ):
         self.daily_service = daily_service
         self.task_service = task_service
         self.add_task_menu_fn = add_task_menu_fn
         self.date_provider = date_provider
         self.task_editor = task_editor
-        self.sync_manager = sync_manager
 
     def get_today(self) -> date:
         """Return today's date from daily_service or injected clock."""
@@ -154,11 +152,11 @@ class TimelineView:
                         "  [dim italic]No tasks scheduled for this date. Press '+' to schedule a task.[/dim italic]\n"
                     )
             else:
-                table = Table.grid(padding=(0, 1))
+                table = Table.grid(expand=True, padding=(0, 1))
                 table.add_column("cursor", justify="right", style="cyan bold", width=2)
                 table.add_column("num", justify="right", style="cyan bold", width=4)
                 table.add_column("icon", justify="center", width=3)
-                table.add_column("title")
+                table.add_column("title", ratio=1, no_wrap=True, overflow="ellipsis")
                 table.add_column("source", justify="right", style="dim", width=14)
                 if domain == "past":
                     table.add_column("time", justify="right", style="dim", width=12)

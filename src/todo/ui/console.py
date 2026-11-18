@@ -5,6 +5,7 @@ import contextlib
 import io
 import re
 import select
+import signal
 import sys
 import termios
 import tty
@@ -85,6 +86,88 @@ console.input = _safe_console_input
 _IN_ALT_SCREEN = False
 
 
+class ViewportManager:
+    """
+    Coordinates atomic, tear-free viewport rendering for full-screen TUI views.
+
+    Eliminates visible screen flickering and blank flashes by:
+    1. Intercepting clear_viewport() to begin buffering frame output instead of emitting
+       destructive terminal wipe sequences (\\x1b[2J).
+    2. Overwriting the viewport in-place from home (\\x1b[H), erasing trailing characters on
+       each row with \\x1b[K and erasing trailing lines below the view with \\x1b[J.
+    3. Framing all frame updates in DEC Mode 2026 Synchronized Output (\\x1b[?2026h ... \\x1b[?2026l)
+       which modern terminal emulators (Kitty, WezTerm, Alacritty) render atomically on vsync.
+    4. Automatically committing the frame buffer immediately before reading user keyboard or text
+       input via KeyReader hooks.
+    """
+
+    def __init__(self, console_instance: Console):
+        self.console = console_instance
+        self._capturing = False
+        self._enabled = True
+        self._force_active = False
+
+    @property
+    def is_active(self) -> bool:
+        """Return True if alt screen is active and atomic viewport management is enabled."""
+        return (self._force_active or _IN_ALT_SCREEN) and self._enabled and self.console.file is not None
+
+    def begin_frame(self) -> None:
+        """Begin capturing a new frame or clear the screen."""
+        if not self.is_active:
+            if sys.stdout.isatty() and getattr(self.console, "_buffer_index", 0) == 0:
+                self.console.clear()
+            return
+
+        # If already capturing an uncommitted frame (e.g. rapid consecutive clears), discard first
+        if self._capturing:
+            self.discard_frame()
+
+        # If an external capture is active (e.g. tests using 'with console.capture():'), do not interfere
+        if getattr(self.console, "_buffer_index", 0) > 0:
+            return
+
+        self.console.begin_capture()
+        self._capturing = True
+
+    def commit_frame(self) -> None:
+        """Commit the captured frame buffer atomically to the terminal."""
+        if not self._capturing:
+            return
+
+        captured = self.console.end_capture()
+        self._capturing = False
+
+        if captured is None:
+            return
+
+        lines = captured.splitlines()
+        if not lines:
+            formatted_content = "\x1b[H\x1b[J"
+        else:
+            formatted_content = "\x1b[H" + "\x1b[K\n".join(lines) + "\x1b[K\x1b[J"
+
+        payload = f"\x1b[?2026h{formatted_content}\x1b[?2026l"
+
+        try:
+            self.console.file.write(payload)
+            self.console.file.flush()
+        except Exception:
+            pass
+
+    def discard_frame(self) -> None:
+        """Discard any currently capturing frame buffer without writing to terminal."""
+        if self._capturing:
+            try:
+                self.console.end_capture()
+            except Exception:
+                pass
+            self._capturing = False
+
+
+viewport_manager = ViewportManager(console)
+
+
 def enter_alt_screen() -> None:
     """Enter terminal alternate screen buffer and hide cursor if in a TTY."""
     global _IN_ALT_SCREEN
@@ -97,6 +180,7 @@ def enter_alt_screen() -> None:
 def exit_alt_screen() -> None:
     """Exit terminal alternate screen buffer and restore cursor."""
     global _IN_ALT_SCREEN
+    viewport_manager.discard_frame()
     if sys.stdout.isatty() and _IN_ALT_SCREEN:
         console.show_cursor(True)
         console.set_alt_screen(False)
@@ -117,16 +201,56 @@ def alt_screen():
         exit_alt_screen()
 
 
+_RESIZED = False
+
+
+def _sigwinch_handler(signum: Any, frame: Any) -> None:
+    global _RESIZED
+    _RESIZED = True
+
+
+def check_and_clear_resized() -> bool:
+    """Return True if a terminal resize signal was received since last check, and reset flag."""
+    global _RESIZED
+    if _RESIZED:
+        _RESIZED = False
+        return True
+    return False
+
+
 @contextlib.contextmanager
 def tui_mode():
-    """Context manager combining alternate screen buffer and cbreak keyboard mode."""
-    with alt_screen(), key_reader.active_mode():
-        yield
+    """Context manager combining alternate screen buffer, cbreak keyboard mode, and SIGWINCH handling."""
+    old_handler = None
+    if hasattr(signal, "SIGWINCH"):
+        try:
+            old_handler = signal.signal(signal.SIGWINCH, _sigwinch_handler)
+        except Exception:
+            old_handler = None
+
+    try:
+        with alt_screen(), key_reader.active_mode():
+            yield
+    finally:
+        if hasattr(signal, "SIGWINCH") and old_handler is not None:
+            try:
+                signal.signal(signal.SIGWINCH, old_handler)
+            except Exception:
+                pass
 
 
 def clear_viewport() -> None:
-    """Clear the viewport screen."""
-    console.clear()
+    """Clear the viewport screen or begin an atomic frame update."""
+    viewport_manager.begin_frame()
+
+
+def commit_viewport() -> None:
+    """Commit any buffered viewport changes atomically."""
+    viewport_manager.commit_frame()
+
+
+# Register commit_viewport as the before-read hook for KeyReader
+key_reader.set_before_read_hook(commit_viewport)
 
 
 def format_today_title(date_obj: Optional[Union[datetime, date, str]] = None) -> str:
@@ -184,6 +308,13 @@ def render_today_header(
 
     left_text = date_str.upper()
     right_text = format_today_progress(completed, total, avail_width, len(left_text))
+
+    # Guard against narrow screens: preserve right_text and truncate left_text with ellipsis
+    needed_right = len(right_text)
+    if len(left_text) + 1 + needed_right > avail_width:
+        max_left = max(4, avail_width - needed_right - 1)
+        if len(left_text) > max_left:
+            left_text = left_text[: max_left - 1] + "…"
 
     table = Table.grid(expand=True)
     table.add_column(justify="left", no_wrap=True)

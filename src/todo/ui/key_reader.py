@@ -7,7 +7,7 @@ import select
 import sys
 import termios
 import tty
-from typing import Optional
+from typing import Callable, Optional
 
 
 class Key:
@@ -36,6 +36,19 @@ class KeyReader:
     def __init__(self):
         self._orig_termios = None
         self._is_active = False
+        self._before_read_hook: Optional[Callable[[], None]] = None
+
+    def set_before_read_hook(self, hook: Optional[Callable[[], None]]) -> None:
+        """Register a callback invoked immediately before reading keyboard or text input."""
+        self._before_read_hook = hook
+
+    def _trigger_before_read(self) -> None:
+        """Execute the before-read hook if registered."""
+        if self._before_read_hook is not None:
+            try:
+                self._before_read_hook()
+            except Exception:
+                pass
 
     def enter(self) -> None:
         """Enter terminal cbreak mode with echo disabled."""
@@ -67,6 +80,7 @@ class KeyReader:
         Read a single key event, optionally with a timeout in seconds.
         Returns a Key constant or character string, or None if timeout elapsed.
         """
+        self._trigger_before_read()
         if not sys.stdin.isatty():
             # Non-interactive / piped / testing mode
             if timeout is not None and timeout <= 0:
@@ -107,28 +121,47 @@ class KeyReader:
         try:
             fd = sys.stdin.fileno()
             if timeout is not None:
-                r, _, _ = select.select([fd], [], [], timeout)
-                if not r:
+                try:
+                    r, _, _ = select.select([fd], [], [], timeout)
+                    if not r:
+                        return None
+                except (InterruptedError, select.error, OSError):
                     return None
 
-            raw1 = os.read(fd, 1)
+            try:
+                raw1 = os.read(fd, 1)
+            except (InterruptedError, OSError):
+                return None
+
             if not raw1:
                 raise EOFError()
             ch = raw1.decode("utf-8", errors="replace")
 
             if ch == "\x1b":
-                # Check for escape sequence with short timeout (35ms)
-                r, _, _ = select.select([fd], [], [], 0.035)
+                # Check for escape sequence with short timeout (50ms)
+                try:
+                    r, _, _ = select.select([fd], [], [], 0.05)
+                except (InterruptedError, select.error, OSError):
+                    return Key.ESCAPE
                 if not r:
                     return Key.ESCAPE
 
-                raw2 = os.read(fd, 1)
+                try:
+                    raw2 = os.read(fd, 1)
+                except (InterruptedError, OSError):
+                    return Key.ESCAPE
                 ch2 = raw2.decode("utf-8", errors="replace")
                 if ch2 in ("[", "O"):
-                    r2, _, _ = select.select([fd], [], [], 0.035)
+                    try:
+                        r2, _, _ = select.select([fd], [], [], 0.05)
+                    except (InterruptedError, select.error, OSError):
+                        return Key.ESCAPE
                     if not r2:
                         return Key.ESCAPE
-                    raw3 = os.read(fd, 1)
+                    try:
+                        raw3 = os.read(fd, 1)
+                    except (InterruptedError, OSError):
+                        return Key.ESCAPE
                     ch3 = raw3.decode("utf-8", errors="replace")
                     if ch3 == "A":
                         return Key.UP
@@ -144,9 +177,12 @@ class KeyReader:
                         return Key.END
                     elif ch3 in ("1", "2", "3", "5", "6"):
                         # Possible ~ extension, e.g. [3~ for delete, [5~ for pageup
-                        r3, _, _ = select.select([fd], [], [], 0.035)
-                        if r3:
-                            os.read(fd, 1)  # consumes '~'
+                        try:
+                            r3, _, _ = select.select([fd], [], [], 0.05)
+                            if r3:
+                                os.read(fd, 1)  # consumes '~'
+                        except (InterruptedError, select.error, OSError):
+                            pass
                         if ch3 == "3":
                             return Key.DELETE
                         elif ch3 == "5":
@@ -159,10 +195,13 @@ class KeyReader:
                         # Check if 43;2u / 43;2~ (Shift + +) or 4~ (End)
                         seq = ch3
                         while True:
-                            r_seq, _, _ = select.select([fd], [], [], 0.035)
-                            if not r_seq:
+                            try:
+                                r_seq, _, _ = select.select([fd], [], [], 0.05)
+                                if not r_seq:
+                                    break
+                                seq += os.read(fd, 1).decode("utf-8", errors="replace")
+                            except (InterruptedError, select.error, OSError):
                                 break
-                            seq += os.read(fd, 1).decode("utf-8", errors="replace")
                             if seq.endswith(("~", "u")):
                                 break
                         if seq in ("43;2u", "43;2~", "43;2"):
@@ -196,6 +235,7 @@ class KeyReader:
         Temporarily pause cbreak mode to read a line of text, then resume cbreak mode.
         If prefill is provided, prepopulates the text input buffer with existing text.
         """
+        self._trigger_before_read()
         if not sys.stdin.isatty():
             line = sys.stdin.readline()
             if not line:

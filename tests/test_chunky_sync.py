@@ -9,7 +9,6 @@ from todo.integrations.filemeta import FilemetaScanResult, ScannedFile
 from todo.models import ChunkyResource, ChunkyTask, FileItem, Source, Task
 from todo.services.chunky_service import ChunkyService
 from todo.services.daily_service import DailyService
-from todo.services.google_tasks_service import GoogleTasksService
 from todo.services.source_service import SourceService
 from todo.services.task_service import TaskService
 
@@ -20,40 +19,6 @@ def temp_db(tmp_path):
     db = Database(db_file)
     db.init_db()
     return db
-
-
-def test_google_tasks_sync_isolation(temp_db):
-    """Source-backed chunky tasks must never be synchronized to Google Tasks."""
-    task_service = TaskService(temp_db)
-    gtasks_service = GoogleTasksService(temp_db, config=MagicMock())
-
-    # Create tasks of each source type
-    yt_task = task_service.create_task(
-        title="YT Chunk [00:00:00–00:20:00]",
-        source_type="youtube",
-        source_id=1,
-    )
-    tg_task = task_service.create_task(
-        title="TG Chunk [00:00:00–00:15:00]",
-        source_type="telegram",
-        source_id=2,
-    )
-    fm_task = task_service.create_task(
-        title="PDF Chunk [p. 1–10]",
-        source_type="filemeta",
-        source_id=3,
-    )
-
-    # Calling sync_task_created on source-backed tasks must be a no-op
-    gtasks_service.sync_task_created(yt_task)
-    gtasks_service.sync_task_created(tg_task)
-    gtasks_service.sync_task_created(fm_task)
-
-    # Check outbox is empty
-    with temp_db.get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) as cnt FROM google_tasks_outbox")
-        assert cursor.fetchone()["cnt"] == 0
 
 
 def test_today_scheduling_and_carry_forward(temp_db):

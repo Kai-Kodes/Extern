@@ -1,11 +1,10 @@
 """Configuration management for Todo CLI."""
 
+import ast
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
-import ast
-import os
+from typing import Optional
 import tomllib
 
 
@@ -21,21 +20,6 @@ class Config:
     pomodoro_work_sound: Optional[str] = None
     pomodoro_break_sound: Optional[str] = None
     pomodoro_audio_player: Optional[str] = None
-    google_client_id: Optional[str] = None
-    google_client_secret: Optional[str] = None
-    google_credentials_file: Optional[Path] = None
-    google_token_path: Optional[Path] = None
-    google_sync_interval: float = 3.0
-    google_sync_idle_interval: float = 15.0
-    google_sync_error_interval: float = 30.0
-    google_sync_timeout: float = 7.0
-    google_tasks_enabled: bool = True
-    google_calendar_enabled: bool = True
-    google_default_task_list: str = "@default"
-    google_default_calendar: str = "primary"
-    google_calendar_delete_policy: str = "delete"  # 'delete' or 'keep'
-    google_calendar_unschedule_policy: str = "delete"  # 'delete' or 'keep'
-    google_calendar_complete_policy: str = "keep"  # 'keep' or 'delete'
 
     @classmethod
     def load(cls) -> "Config":
@@ -100,54 +84,6 @@ class Config:
         pomodoro_break_sound = os.environ.get("TODO_POMODORO_BREAK_SOUND")
         pomodoro_audio_player = os.environ.get("TODO_POMODORO_PLAYER")
 
-        google_client_id = (
-            os.environ.get("GOOGLE_TASKS_CLIENT_ID")
-            or os.environ.get("TODO_GOOGLE_CLIENT_ID")
-        )
-        google_client_secret = (
-            os.environ.get("GOOGLE_TASKS_CLIENT_SECRET")
-            or os.environ.get("TODO_GOOGLE_CLIENT_SECRET")
-        )
-        env_google_creds = (
-            os.environ.get("GOOGLE_TASKS_CREDENTIALS_FILE")
-            or os.environ.get("TODO_GOOGLE_CREDENTIALS_FILE")
-        )
-        google_credentials_file = (
-            Path(env_google_creds).expanduser().resolve()
-            if env_google_creds
-            else None
-        )
-        env_google_token = (
-            os.environ.get("GOOGLE_TASKS_TOKEN_PATH")
-            or os.environ.get("TODO_GOOGLE_TOKEN_PATH")
-        )
-        google_token_path = (
-            Path(env_google_token).expanduser().resolve()
-            if env_google_token
-            else None
-        )
-
-        google_sync_interval = float(os.environ.get("TODO_GOOGLE_SYNC_INTERVAL", "3.0"))
-        google_sync_idle_interval = float(os.environ.get("TODO_GOOGLE_SYNC_IDLE_INTERVAL", "15.0"))
-        google_sync_error_interval = float(os.environ.get("TODO_GOOGLE_SYNC_ERROR_INTERVAL", "30.0"))
-        google_sync_timeout = float(os.environ.get("TODO_GOOGLE_SYNC_TIMEOUT", "7.0"))
-
-        def _parse_bool(val: Any, default: bool) -> bool:
-            if val is None:
-                return default
-            if isinstance(val, bool):
-                return val
-            s = str(val).strip().lower()
-            return s in ("1", "true", "yes", "on")
-
-        google_tasks_enabled = _parse_bool(os.environ.get("TODO_GOOGLE_TASKS_ENABLED"), True)
-        google_calendar_enabled = _parse_bool(os.environ.get("TODO_GOOGLE_CALENDAR_ENABLED"), True)
-        google_default_task_list = str(os.environ.get("TODO_GOOGLE_DEFAULT_TASK_LIST", "@default")).strip()
-        google_default_calendar = str(os.environ.get("TODO_GOOGLE_DEFAULT_CALENDAR", "primary")).strip()
-        google_calendar_delete_policy = str(os.environ.get("TODO_GOOGLE_CALENDAR_DELETE_POLICY", "delete")).strip().lower()
-        google_calendar_unschedule_policy = str(os.environ.get("TODO_GOOGLE_CALENDAR_UNSCHEDULE_POLICY", "delete")).strip().lower()
-        google_calendar_complete_policy = str(os.environ.get("TODO_GOOGLE_CALENDAR_COMPLETE_POLICY", "keep")).strip().lower()
-
         if config_file.exists():
             try:
                 with open(config_file, "rb") as f:
@@ -190,67 +126,9 @@ class Config:
                     if not pomodoro_audio_player and "player" in pomo_sec:
                         pomodoro_audio_player = str(pomo_sec["player"]).strip()
 
-                gt_sec = data.get("google_tasks") or data.get("google")
-                if gt_sec and isinstance(gt_sec, dict):
-                    if not google_client_id and "client_id" in gt_sec:
-                        google_client_id = str(gt_sec["client_id"]).strip()
-                    if not google_client_secret and "client_secret" in gt_sec:
-                        google_client_secret = str(gt_sec["client_secret"]).strip()
-                    if not google_credentials_file and "credentials_file" in gt_sec:
-                        google_credentials_file = Path(gt_sec["credentials_file"]).expanduser().resolve()
-                    if not google_token_path and "token_path" in gt_sec:
-                        google_token_path = Path(gt_sec["token_path"]).expanduser().resolve()
-                    if "sync_interval" in gt_sec:
-                        google_sync_interval = float(gt_sec["sync_interval"])
-                    if "sync_idle_interval" in gt_sec:
-                        google_sync_idle_interval = float(gt_sec["sync_idle_interval"])
-                    if "sync_error_interval" in gt_sec:
-                        google_sync_error_interval = float(gt_sec["sync_error_interval"])
-                    if "sync_timeout" in gt_sec:
-                        google_sync_timeout = float(gt_sec["sync_timeout"])
-                    if "tasks_enabled" in gt_sec or "enabled" in gt_sec:
-                        google_tasks_enabled = _parse_bool(gt_sec.get("tasks_enabled", gt_sec.get("enabled")), True)
-                    if "calendar_enabled" in gt_sec:
-                        google_calendar_enabled = _parse_bool(gt_sec["calendar_enabled"], True)
-                    if "default_task_list" in gt_sec or "default_list" in gt_sec:
-                        google_default_task_list = str(gt_sec.get("default_task_list") or gt_sec.get("default_list")).strip()
-                    if "default_calendar" in gt_sec:
-                        google_default_calendar = str(gt_sec["default_calendar"]).strip()
-                    if "calendar_delete_policy" in gt_sec:
-                        google_calendar_delete_policy = str(gt_sec["calendar_delete_policy"]).strip().lower()
-                    if "calendar_unschedule_policy" in gt_sec:
-                        google_calendar_unschedule_policy = str(gt_sec["calendar_unschedule_policy"]).strip().lower()
-                    if "calendar_complete_policy" in gt_sec:
-                        google_calendar_complete_policy = str(gt_sec["calendar_complete_policy"]).strip().lower()
-
-                cal_sec = data.get("google_calendar")
-                if cal_sec and isinstance(cal_sec, dict):
-                    if "enabled" in cal_sec or "calendar_enabled" in cal_sec:
-                        google_calendar_enabled = _parse_bool(cal_sec.get("enabled", cal_sec.get("calendar_enabled")), True)
-                    if "default_calendar" in cal_sec:
-                        google_default_calendar = str(cal_sec["default_calendar"]).strip()
-                    if "delete_policy" in cal_sec or "calendar_delete_policy" in cal_sec:
-                        google_calendar_delete_policy = str(cal_sec.get("delete_policy", cal_sec.get("calendar_delete_policy"))).strip().lower()
-                    if "unschedule_policy" in cal_sec or "calendar_unschedule_policy" in cal_sec:
-                        google_calendar_unschedule_policy = str(cal_sec.get("unschedule_policy", cal_sec.get("calendar_unschedule_policy"))).strip().lower()
-                    if "complete_policy" in cal_sec or "calendar_complete_policy" in cal_sec:
-                        google_calendar_complete_policy = str(cal_sec.get("complete_policy", cal_sec.get("calendar_complete_policy"))).strip().lower()
             except Exception:
                 # If config parsing fails, fallback gracefully to defaults
                 pass
-
-        # Defaults for Google Tasks credentials and token path
-        if not google_token_path:
-            google_token_path = config_dir / "google_token.json"
-
-        if not google_credentials_file:
-            # Check default candidate paths in config_dir
-            for candidate in [config_dir / "client_secret.json", config_dir / "credentials.json"]:
-                if candidate.exists():
-                    google_credentials_file = candidate
-                    break
-            if not google_credentials_file:
-                google_credentials_file = config_dir / "credentials.json"
 
         # Automatic fallback for Telegram session path if not explicitly configured
         if not telegram_session_path:
@@ -281,21 +159,6 @@ class Config:
             pomodoro_work_sound=pomodoro_work_sound,
             pomodoro_break_sound=pomodoro_break_sound,
             pomodoro_audio_player=pomodoro_audio_player,
-            google_client_id=google_client_id,
-            google_client_secret=google_client_secret,
-            google_credentials_file=google_credentials_file,
-            google_token_path=google_token_path,
-            google_sync_interval=google_sync_interval,
-            google_sync_idle_interval=google_sync_idle_interval,
-            google_sync_error_interval=google_sync_error_interval,
-            google_sync_timeout=google_sync_timeout,
-            google_tasks_enabled=google_tasks_enabled,
-            google_calendar_enabled=google_calendar_enabled,
-            google_default_task_list=google_default_task_list,
-            google_default_calendar=google_default_calendar,
-            google_calendar_delete_policy=google_calendar_delete_policy,
-            google_calendar_unschedule_policy=google_calendar_unschedule_policy,
-            google_calendar_complete_policy=google_calendar_complete_policy,
         )
 
     @classmethod
@@ -321,8 +184,5 @@ class Config:
             return None, None
 
     def ensure_directories(self) -> None:
-        """Ensure database and configuration directories exist."""
+        """Ensure database directory exists."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.google_token_path:
-            self.google_token_path.parent.mkdir(parents=True, exist_ok=True)
-

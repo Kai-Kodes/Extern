@@ -10,11 +10,14 @@ Built with Python, Click, Rich, SQLite, and Telethon. Designed to be visually qu
 
 - **Today's Dashboard**: Full-screen alternate-screen terminal interface showing tasks scheduled specifically for today, responsive progress tracking (`42% · 5/12`), and instant arrow/numeric navigation.
 - **Strict Global Silence**: Zero transient status banners or toast chatter on routine actions. Toggle, delete, schedule, and navigate cleanly; only genuine errors are highlighted in red.
+- **Chunky Tasks & Presets**: Consume large videos and books in manageable contiguous chunks with interval tracking (`00:20:00–00:40:00`), customizable presets, and "Entire remaining resource" options.
+- **Pomodoro Timer**: Integrated interval focus timer with configurable work/break cycles, audio cues, and background timer ticking.
+- **Timeline View**: Historical completion calendar and future day scheduling with day-by-day task inspection.
 - **Universal Task Master List**: Maintain a reusable backlog of tasks independent of any date. Schedule universal tasks to Today without duplicating underlying records.
 - **Filemeta Course Integration**: Import local course directories via `filemeta`. Extracts titles, durations, and page counts directly from media metadata without manual typing.
-- **Native Telegram Course Integration**: Browse course channels and supergroups directly inside the TUI. Import video lessons into your local library, track completion, and schedule daily study sessions.
-- **Local-First SQLite Storage**: Stored at `~/.local/share/todo/todo.db` with WAL mode and foreign key cascades. All imports, completions, and channel dialogs are cached locally for instantaneous offline startup.
-- **Dual Mode (TUI + CLI)**: Launch interactive mode with `todo`, or pipe and script workflows via Click commands like `todo today`, `todo add`, `todo list`, and `todo sources`.
+- **Native Telegram & YouTube Integration**: Browse course channels and YouTube playlists directly inside the TUI. Import video lessons into your local library, track completion, and schedule daily study sessions.
+- **Cross-Device Client Mode (Termux / Android / Linux)**: Fully functional without mandatory scrapers or external binaries. Browse, toggle, and schedule cached items on mobile; optional tools (`telethon`, `yt-dlp`, `filemeta`) are only required for active rescans or network imports.
+- **Safe SQLite Sync via rclone**: WAL checkpointing (`PRAGMA wal_checkpoint(TRUNCATE)`) on exit and dedicated `todo db-checkpoint` CLI command for clean, corruption-free syncing with Dropbox via `rclone`.
 
 ---
 
@@ -62,18 +65,23 @@ todo/
 ### Requirements
 
 - Python >= 3.11
-- Linux (x86_64, aarch64)
-- Optional: `telethon` (for Telegram course integration)
-- Optional: `filemeta` CLI utility (for local directory course extraction)
+- Linux (x86_64, aarch64) or Android (Termux)
+- Optional extras: `telethon` (for Telegram), `yt-dlp` (for YouTube), `filemeta` CLI (for local directories)
 
-### Quick Install
+### Quick Install (Linux Desktop / Server)
 
-Clone the repository and install in editable mode:
+Clone the repository and install:
 
 ```bash
 git clone https://github.com/Kai-Kodes/Extern.git
 cd Extern
 pip install -e .
+```
+
+To install optional scraper tools (`telethon` and `yt-dlp`):
+
+```bash
+pip install -e ".[full]"
 ```
 
 Or using [pipx](https://pypa.github.io/pipx/):
@@ -82,7 +90,23 @@ Or using [pipx](https://pypa.github.io/pipx/):
 pipx install .
 ```
 
-This installs the `todo` binary into your `PATH` (typically `~/.local/bin/todo`).
+### Termux on Android Installation
+
+Extern runs in client mode on Termux without requiring external tools:
+
+```bash
+# 1. Update packages and install Python & Git
+pkg update && pkg install -y python git rclone
+
+# 2. Clone repository
+git clone https://github.com/Kai-Kodes/Extern.git ~/Extern
+cd ~/Extern
+
+# 3. Install in editable mode
+pip install -e .
+```
+
+All existing task libraries, cached video metadata, and progress can be scheduled and toggled on Android without heavy scraping dependencies.
 
 ---
 
@@ -103,12 +127,62 @@ todo
 | `↑` / `↓` | Navigate task list |
 | `Enter` | Toggle task completion |
 | `1` .. `9` | Directly toggle task #1..9 |
-| `+` | Open Add Task menu (Filemeta, Universal, Manual, Telegram) |
+| `+` | Open Add Task menu (1. Filemeta, 2. Telegram, 3. YouTube, 4. Universal, 5. Manual) |
+| `c` | Open Chunky Tasks view (chunk creation, presets, and gap progress) |
+| `p` | Open Pomodoro Focus Timer |
+| `l` | Open Timeline view (calendar completion history & future planning) |
+| `e` | Edit selected task title, notes, or schedule |
 | `d` | Remove selected task from Today's schedule |
+| `m` | Move selected task to Universal backlog |
 | `u` | Open Universal task master list |
 | `f` | Open Filemeta course library |
 | `t` | Open Telegram course library |
-| `q` / `Esc` | Quit |
+| `y` | Open YouTube playlist library |
+| `q` / `Esc` | Quit cleanly (automatically truncates WAL) |
+
+---
+
+## Safe Cross-Device Sync (Dropbox via rclone)
+
+To keep `todo.db` safely synced across your desktop machine and mobile Termux without SQLite WAL corruption:
+
+### 1. Checkpoint WAL State
+
+Extern automatically flushes and truncates SQLite WAL (`PRAGMA wal_checkpoint(TRUNCATE)`) on clean exit. You can also run it explicitly from the command line:
+
+```bash
+todo db-checkpoint
+```
+
+### 2. Synchronization Wrapper Script (`todo-sync.sh`)
+
+Save this wrapper script on both your desktop and Termux to sync with Dropbox using `rclone`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+DB_LOCAL="${XDG_DATA_HOME:-$HOME/.local/share}/todo/todo.db"
+DB_REMOTE="dropbox:Apps/todo-sync/todo.db"
+
+# 1. Pull latest database from Dropbox
+echo "Pulling latest todo.db from remote..."
+rclone copyto "$DB_REMOTE" "$DB_LOCAL"
+
+# 2. Checkpoint and run Todo
+todo db-checkpoint
+todo
+
+# 3. Checkpoint WAL into single database file before upload
+todo db-checkpoint
+
+# 4. Push updated database back to Dropbox
+echo "Pushing updated todo.db to remote..."
+rclone copyto "$DB_LOCAL" "$DB_REMOTE"
+echo "Sync complete."
+```
+
+Make it executable: `chmod +x ~/bin/todo-sync.sh`. Run `todo-sync.sh` whenever you want to start a session with automatic sync.
 
 ---
 
@@ -163,6 +237,9 @@ todo list
 
 # List imported Filemeta course sources
 todo sources
+
+# Truncate and flush SQLite WAL for clean backup/sync
+todo db-checkpoint
 ```
 
 ---

@@ -13,9 +13,6 @@ from todo.integrations.youtube import YouTubeAdapter
 from todo.models import DailyTask
 from todo.services.audio_service import AudioService
 from todo.services.daily_service import DailyService
-from todo.services.google_calendar_service import GoogleCalendarService
-from todo.services.google_tasks_service import GoogleTasksService
-from todo.services.google_tasks_sync_manager import GoogleTasksSyncManager
 from todo.services.pomodoro_service import PomodoroService
 from todo.services.pomodoro_timer import PomodoroTimer
 from todo.services.source_service import SourceService
@@ -24,6 +21,7 @@ from todo.ui.add_task_view import AddTaskView
 from todo.services.chunky_service import ChunkyService
 from todo.ui.chunky_view import ChunkyTaskView
 from todo.ui.console import (
+    check_and_clear_resized,
     clear_viewport,
     console,
     read_key,
@@ -33,7 +31,6 @@ from todo.ui.console import (
 )
 from todo.ui.filemeta_view import FilemetaView
 from todo.ui.focus_detector import FocusDetector
-from todo.ui.google_tasks_view import GoogleTasksView
 from todo.ui.key_reader import Key, key_reader
 from todo.ui.manual_view import ManualView
 from todo.ui.pomodoro_view import PomodoroView
@@ -100,49 +97,14 @@ class TodoApp:
             task_service=self.task_service,
             daily_service=self.daily_service,
         )
-        self.google_tasks_service = GoogleTasksService(
-            db=self.db,
-            config=self.config,
-            date_provider=self.date_provider,
-        )
-        self.google_calendar_service = GoogleCalendarService(
-            db=self.db,
-            config=self.config,
-            date_provider=self.date_provider,
-            oauth_manager=self.google_tasks_service.oauth_manager,
-        )
-        self.google_tasks_sync_manager = GoogleTasksSyncManager(
-            google_tasks_service=self.google_tasks_service,
-            google_calendar_service=self.google_calendar_service,
-            interval=self.config.google_sync_interval,
-            idle_interval=self.config.google_sync_idle_interval,
-            error_interval=self.config.google_sync_error_interval,
-            date_provider=self.date_provider,
-        )
-        self.google_tasks_service.sync_manager = self.google_tasks_sync_manager
-        self.google_calendar_service.sync_manager = self.google_tasks_sync_manager
-        self.task_service.google_tasks_service = self.google_tasks_service
-        self.task_service.google_calendar_service = self.google_calendar_service
-        self.daily_service.google_tasks_service = self.google_tasks_service
-        self.daily_service.google_calendar_service = self.google_calendar_service
-        self.daily_service.google_tasks_sync_manager = self.google_tasks_sync_manager
         self.task_editor = TaskEditor(
             task_service=self.task_service,
             daily_service=self.daily_service,
-            google_tasks_service=self.google_tasks_service,
-            google_calendar_service=self.google_calendar_service,
-        )
-        self.google_tasks_view = GoogleTasksView(
-            google_tasks_service=self.google_tasks_service,
-            daily_service=self.daily_service,
-            task_editor=self.task_editor,
-            sync_manager=self.google_tasks_sync_manager,
         )
         self.universal_view = UniversalView(
             self.task_service,
             self.daily_service,
             task_editor=self.task_editor,
-            sync_manager=self.google_tasks_sync_manager,
         )
         self.manual_view = ManualView(self.task_service, self.daily_service)
         self.timeline_view = TimelineView(
@@ -151,7 +113,6 @@ class TodoApp:
             add_task_menu_fn=self.handle_add_task_menu,
             date_provider=self.date_provider,
             task_editor=self.task_editor,
-            sync_manager=self.google_tasks_sync_manager,
         )
 
         self.pomodoro_service = PomodoroService(self.db, date_provider=self.date_provider)
@@ -175,12 +136,11 @@ class TodoApp:
     def run(self) -> None:
         """Run the main interactive application loop inside the alternate terminal screen."""
         try:
-            self.google_tasks_sync_manager.start()
             with tui_mode():
                 self._main_loop()
         finally:
-            self.google_tasks_sync_manager.stop()
             self.telegram_adapter.disconnect()
+            self.db.close()
 
     def _main_loop(self) -> None:
         status_msg: Optional[str] = None
@@ -189,25 +149,23 @@ class TodoApp:
         selected_task_id: Optional[int] = None
         selected_task_ids: Set[int] = set()
         mode: Optional[str] = None
-        last_rendered_version = -1
         last_rendered_date = ""
         last_rendered_mode = None
-        last_rendered_auth_needed = False
+        last_rendered_size = (0, 0)
         needs_redraw = True
 
         while True:
             try:
                 today_str = self.daily_service.get_today_str()
-                current_version = self.google_tasks_sync_manager.change_version
-                cur_sync_status = self.google_tasks_sync_manager.get_status_text()
-                cur_auth_needed = "Auth Needed" in cur_sync_status
+                cur_size = (console.width, console.height)
+                resized = check_and_clear_resized()
 
                 if (
                     needs_redraw
-                    or current_version != last_rendered_version
                     or today_str != last_rendered_date
                     or mode != last_rendered_mode
-                    or cur_auth_needed != last_rendered_auth_needed
+                    or cur_size != last_rendered_size
+                    or resized
                     or status_msg is not None
                 ):
                     tasks = self.daily_service.get_active_tasks_for_date(today_str)
@@ -217,7 +175,7 @@ class TodoApp:
                     valid_ids = {dt.id for dt in tasks}
                     selected_task_ids.intersection_update(valid_ids)
 
-                    # Anchor cursor stably by task ID across remote updates
+                    # Anchor cursor stably by task ID across updates
                     if tasks:
                         if selected_task_id is not None:
                             found_idx = next((i for i, dt in enumerate(tasks) if dt.id == selected_task_id), None)
@@ -244,12 +202,10 @@ class TodoApp:
                         total_count=total_cnt,
                         selected_ids=selected_task_ids,
                         mode=mode,
-                        sync_status=cur_sync_status,
                     )
-                    last_rendered_version = current_version
                     last_rendered_date = today_str
                     last_rendered_mode = mode
-                    last_rendered_auth_needed = cur_auth_needed
+                    last_rendered_size = cur_size
                     status_msg = None
                     status_style = "green"
                     needs_redraw = False
@@ -257,19 +213,17 @@ class TodoApp:
                 choice = read_key(timeout=0.2)
                 if choice is None:
                     # Timeout elapsed: no key pressed.
-                    # Redraw only if remote sync mutated local data, date changed, or auth status changed
+                    # Redraw only if date changed or terminal resized
                     cur_today = self.daily_service.get_today_str()
-                    cur_ver = self.google_tasks_sync_manager.change_version
-                    cur_auth = "Auth Needed" in self.google_tasks_sync_manager.get_status_text()
+                    cur_sz = (console.width, console.height)
                     if (
-                        cur_ver != last_rendered_version
-                        or cur_today != last_rendered_date
-                        or cur_auth != last_rendered_auth_needed
+                        cur_today != last_rendered_date
+                        or cur_sz != last_rendered_size
+                        or check_and_clear_resized()
                     ):
                         needs_redraw = True
                     continue
 
-                self.google_tasks_sync_manager.record_user_activity()
                 needs_redraw = True
 
                 if mode == "delete":
@@ -410,9 +364,6 @@ class TodoApp:
                                 status_style = "yellow"
                         continue
 
-                    if choice.lower() in ("g", "google", "gtasks"):
-                        self.google_tasks_view.run()
-                        continue
 
                     if choice.lower() in ("l", "timeline"):
                         self.timeline_view.run()

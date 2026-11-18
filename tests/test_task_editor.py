@@ -462,31 +462,6 @@ def test_task_editor_create_task_starts_empty_and_isolated(test_env):
     assert orig.description == "Stale Notes"
 
 
-def test_task_editor_google_tasks_error_surfaced(test_env):
-    """Verify errors from Google Tasks update are surfaced and editor handles them."""
-    task_svc: TaskService = test_env["task_svc"]
-    daily_svc: DailyService = test_env["daily_svc"]
-
-    task = task_svc.create_task("Google Task", source_type="google_tasks", source_id=999)
-
-    mock_gtasks_service = type("MockService", (), {})()
-    def fail_update(**kwargs):
-        raise RuntimeError("Google API network timeout (HTTP 504)")
-    mock_gtasks_service.update_task = fail_update
-
-    editor = TaskEditor(task_svc, daily_svc, google_tasks_service=mock_gtasks_service)
-
-    # Attempt to edit title and save -> fails with error -> cancel with 'b'
-    inputs = ["1\n", "Attempted Title\n", "s\n", "b\n"]
-    with patch("sys.stdin", io.StringIO("".join(inputs))):
-        saved, msg = editor.edit_task(task)
-
-    assert saved is False
-    assert "cancelled" in msg.lower()
-    # Task title was not updated in DB because remote update failed
-    assert task_svc.get_task_by_id(task.id).title == "Google Task"
-
-
 def test_key_reader_readline_prefill_hook():
     """Verify KeyReader.read_text_input configures and clears readline hook in interactive mode."""
     from todo.ui.key_reader import KeyReader
