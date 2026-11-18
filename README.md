@@ -163,7 +163,7 @@ Save this wrapper script on both your desktop and Termux to sync with Dropbox us
 set -euo pipefail
 
 DB_LOCAL="${XDG_DATA_HOME:-$HOME/.local/share}/todo/todo.db"
-DB_REMOTE="dropbox:Apps/todo-sync/todo.db"
+DB_REMOTE="dropbox:Extern/todo.db"
 
 # 1. Pull latest database from Dropbox
 echo "Pulling latest todo.db from remote..."
