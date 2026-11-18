@@ -147,3 +147,20 @@ def test_auth_telegram_login_flow(cli_env):
         cfg = Config.load()
         assert cfg.telegram_api_id == 123456
         assert cfg.telegram_api_hash == "my_api_hash"
+
+
+def test_cli_no_sync_flag_and_startup(cli_env):
+    """Verify that launching extern with --no-sync does not pull or enable sync."""
+    runner = CliRunner()
+    with patch("todo.cli.TodoApp") as mock_app_cls:
+        mock_instance = MagicMock()
+        mock_app_cls.return_value = mock_instance
+
+        res = runner.invoke(cli, ["--no-sync"])
+        assert res.exit_code == 0
+        mock_app_cls.assert_called_once()
+        _, kwargs = mock_app_cls.call_args
+        assert kwargs.get("no_sync") is True
+        assert kwargs.get("sync_service") is None
+        mock_instance.run.assert_called_once()
+

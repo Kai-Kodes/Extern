@@ -186,3 +186,228 @@ def test_sync_service_status(sync_env):
     assert status["local_db_size_bytes"] == 5
     assert status["cached_rev"] == "rev_3003"
     assert status["connection"] == "online"
+
+
+def test_sync_service_push_file(sync_env):
+    """Verify push_file uploads a specific snapshot file and updates sync state."""
+    cfg = sync_env["config"]
+    tmp_path = sync_env["tmp"]
+    snapshot = tmp_path / "snapshot.db"
+    snapshot.write_bytes(b"SNAPSHOT_CONTENT")
+
+    mock_client = MagicMock()
+    mock_meta = MagicMock()
+    mock_meta.rev = "rev_snap"
+    mock_meta.content_hash = "hash_snap"
+    mock_client.files_upload.return_value = mock_meta
+
+    svc = SyncService(cfg, client=mock_client)
+    ok, msg = svc.push_file(snapshot)
+
+    assert ok is True
+    assert "Successfully pushed" in msg
+    mock_client.files_upload.assert_called_once()
+    args, kwargs = mock_client.files_upload.call_args
+    assert args[0] == b"SNAPSHOT_CONTENT"
+    assert args[1] == "/todo.db"
+
+    state = svc._read_sync_state()
+    assert state.get("remote_rev") == "rev_snap"
+
+
+def test_sync_service_debounced_push_batches_rapid_writes(sync_env):
+    """Verify debouncing batches rapid edits into a single upload and clears dirty."""
+    import time
+    from todo.database import Database
+
+    cfg = sync_env["config"]
+    db_path = sync_env["db_path"]
+    db = Database(db_path)
+
+    mock_client = MagicMock()
+    mock_meta = MagicMock()
+    mock_meta.rev = "rev_debounced"
+    mock_meta.content_hash = "hash_debounced"
+    mock_client.files_upload.return_value = mock_meta
+
+    svc = SyncService(cfg, client=mock_client)
+
+    # Simulate write
+    db.mark_dirty()
+    assert db.dirty is True
+    assert db.write_version == 1
+
+    # Schedule debounce with 0.1s delay
+    svc.schedule_debounced_push(db, delay=0.1)
+
+    # Immediately schedule another write within debounce window
+    db.mark_dirty()
+    assert db.write_version == 2
+    svc.schedule_debounced_push(db, delay=0.1)
+
+    # Wait for timer to execute
+    time.sleep(0.25)
+
+    # Only 1 upload should have occurred
+    assert mock_client.files_upload.call_count == 1
+    # Dirty flag should now be cleared
+    assert db.dirty is False
+
+
+def test_sync_service_cancel_debounce_timer(sync_env):
+    """Verify cancel_debounce_timer prevents queued upload."""
+    import time
+    from todo.database import Database
+
+    cfg = sync_env["config"]
+    db_path = sync_env["db_path"]
+    db = Database(db_path)
+
+    mock_client = MagicMock()
+    svc = SyncService(cfg, client=mock_client)
+
+    db.mark_dirty()
+    svc.schedule_debounced_push(db, delay=0.1)
+    svc.cancel_debounce_timer()
+
+    time.sleep(0.2)
+    mock_client.files_upload.assert_not_called()
+    assert db.dirty is True
+
+
+def test_sync_service_background_pull_skips_when_dirty(sync_env):
+    """Verify background pull skips downloading when local DB has uncommitted/unsynced edits."""
+    from todo.database import Database
+
+    cfg = sync_env["config"]
+    db_path = sync_env["db_path"]
+    db = Database(db_path)
+    db.mark_dirty()
+
+    mock_client = MagicMock()
+    mock_meta = MagicMock()
+    mock_meta.rev = "rev_remote_newer"
+    mock_meta.content_hash = "hash_remote_newer"
+    mock_client.files_get_metadata.return_value = mock_meta
+
+    svc = SyncService(cfg, client=mock_client)
+    pulled_callback = MagicMock()
+
+    t = svc.start_background_pull(db, on_pulled=pulled_callback)
+    t.join(timeout=2.0)
+
+    # Download should NOT happen because db is dirty
+    mock_client.files_download.assert_not_called()
+    pulled_callback.assert_not_called()
+
+
+def test_sync_service_background_pull_updates_when_clean(sync_env):
+    """Verify background pull downloads and replaces local DB when clean and newer rev exists."""
+    from todo.database import Database
+
+    cfg = sync_env["config"]
+    db_path = sync_env["db_path"]
+    db = Database(db_path)
+    assert db.dirty is False
+
+    mock_client = MagicMock()
+    mock_meta = MagicMock()
+    mock_meta.rev = "rev_newest"
+    mock_meta.content_hash = "hash_newest"
+    mock_client.files_get_metadata.return_value = mock_meta
+
+    mock_res = MagicMock()
+    # Create valid sqlite bytes for downloaded database
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
+        tmp_db_for_bytes = Database(Path(tf.name))
+        with tmp_db_for_bytes.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO tasks (title, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                ("Remote Task", "From background pull", "2026-11-18T00:00:00", "2026-11-18T00:00:00"),
+            )
+            conn.commit()
+        tmp_db_for_bytes.checkpoint()
+        tmp_db_for_bytes.close()
+        downloaded_bytes = Path(tf.name).read_bytes()
+        Path(tf.name).unlink(missing_ok=True)
+
+    mock_res.content = downloaded_bytes
+    mock_client.files_download.return_value = (mock_meta, mock_res)
+
+    svc = SyncService(cfg, client=mock_client)
+    pulled_callback = MagicMock()
+
+    t = svc.start_background_pull(db, on_pulled=pulled_callback)
+    t.join(timeout=2.0)
+
+    mock_client.files_download.assert_called_once()
+    pulled_callback.assert_called_once()
+
+    # Verify task from remote DB is now in local DB
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT title FROM tasks WHERE title = ?", ("Remote Task",))
+        row = cursor.fetchone()
+        assert row is not None
+        assert row["title"] == "Remote Task"
+
+
+def test_todoapp_exit_clean_does_not_spawn_subprocess(sync_env):
+    """Verify clean exit does not spawn detached sync process."""
+    from todo.ui.app import TodoApp
+
+    cfg = sync_env["config"]
+    mock_client = MagicMock()
+    svc = SyncService(cfg, client=mock_client)
+
+    app = TodoApp(config=cfg, sync_service=svc, no_sync=False)
+    assert app.db.dirty is False
+
+    with patch("subprocess.Popen") as mock_popen, patch.object(app, "_main_loop"):
+        app.run()
+
+    mock_popen.assert_not_called()
+
+
+def test_todoapp_exit_dirty_spawns_detached_sync(sync_env):
+    """Verify dirty exit spawns detached sync push process with start_new_session=True."""
+    from todo.ui.app import TodoApp
+
+    cfg = sync_env["config"]
+    mock_client = MagicMock()
+    svc = SyncService(cfg, client=mock_client)
+
+    app = TodoApp(config=cfg, sync_service=svc, no_sync=False)
+
+    def mark_dirty_during_loop():
+        app.db.mark_dirty()
+
+    with patch("subprocess.Popen") as mock_popen, patch.object(app, "_main_loop", side_effect=mark_dirty_during_loop):
+        app.run()
+
+    mock_popen.assert_called_once()
+    args, kwargs = mock_popen.call_args
+    cmd = args[0]
+    assert cmd[1:] == ["-m", "todo.cli", "sync", "push"]
+    assert kwargs.get("start_new_session") is True
+
+
+def test_todoapp_exit_no_sync_flag_skips_spawn(sync_env):
+    """Verify --no-sync flag prevents spawning detached push even when dirty."""
+    from todo.ui.app import TodoApp
+
+    cfg = sync_env["config"]
+    mock_client = MagicMock()
+    svc = SyncService(cfg, client=mock_client)
+
+    app = TodoApp(config=cfg, sync_service=svc, no_sync=True)
+
+    def mark_dirty_during_loop():
+        app.db.mark_dirty()
+
+    with patch("subprocess.Popen") as mock_popen, patch.object(app, "_main_loop", side_effect=mark_dirty_during_loop):
+        app.run()
+
+    mock_popen.assert_not_called()
+
+

@@ -260,3 +260,93 @@ def test_initialization_idempotency_running_twice_succeeds():
             count = cursor.fetchone()[0]
             assert count >= 6
 
+
+def test_database_backup_to_file():
+    """Verify Database.backup_to_file creates an accurate online snapshot of the database."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src_path = Path(tmpdir) / "source.db"
+        dst_path = Path(tmpdir) / "backup.db"
+
+        db = Database(src_path)
+        with db.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO tasks (title, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                ("Test Backup Task", "Snapshot testing", "2026-11-18T00:00:00", "2026-11-18T00:00:00"),
+            )
+            conn.commit()
+
+        # Perform backup
+        db.backup_to_file(dst_path)
+        assert dst_path.exists()
+
+        # Verify backup contains the task
+        backup_db = Database(dst_path)
+        with backup_db.get_connection() as b_conn:
+            cursor = b_conn.cursor()
+            cursor.execute("SELECT title, description FROM tasks WHERE title = ?", ("Test Backup Task",))
+            row = cursor.fetchone()
+            assert row is not None
+            assert row["title"] == "Test Backup Task"
+            assert row["description"] == "Snapshot testing"
+
+
+def test_database_dirty_tracking_and_callbacks():
+    """Verify dirty tracking, write_version increments, clear_dirty version matching, and callbacks."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "dirty_test.db"
+        db = Database(db_path)
+
+        # Database starts clean after init
+        assert db.dirty is False
+        assert db.write_version == 0
+
+        # Read-only query does not trigger dirty
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM tasks")
+            _ = cursor.fetchone()
+
+        assert db.dirty is False
+        assert db.write_version == 0
+
+        # Checkpoint does not trigger dirty
+        db.checkpoint()
+        assert db.dirty is False
+
+        # Hook callback
+        callback_called = []
+        db.on_dirty_callback = lambda: callback_called.append(True)
+
+        # Write operation triggers dirty and callback
+        with db.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO tasks (title, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                ("Dirty Task", "testing dirty flag", "2026-11-18T00:00:00", "2026-11-18T00:00:00"),
+            )
+            conn.commit()
+
+        assert db.dirty is True
+        assert db.write_version == 1
+        assert len(callback_called) >= 1
+
+        # Clearing with wrong version does not clear dirty
+        db.clear_dirty(version=999)
+        assert db.dirty is True
+
+        # Clearing with correct version clears dirty
+        db.clear_dirty(version=1)
+        assert db.dirty is False
+
+        # Another write triggers dirty again
+        with db.get_connection() as conn:
+            conn.execute("UPDATE tasks SET title = ? WHERE title = ?", ("Updated Dirty Task", "Dirty Task"))
+            conn.commit()
+
+        assert db.dirty is True
+        assert db.write_version == 2
+
+        # Unconditional clear works
+        db.clear_dirty()
+        assert db.dirty is False
+
+

@@ -2,7 +2,7 @@
 
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 TABLES_SQL = """
@@ -185,22 +185,149 @@ CREATE INDEX IF NOT EXISTS idx_chunky_presets_unit ON chunky_presets(range_unit)
 SCHEMA_SQL = TABLES_SQL
 
 
+class CursorWrapper:
+    """Wrapper around sqlite3.Cursor to intercept write statements."""
+
+    def __init__(self, raw_cursor: sqlite3.Cursor, conn_wrapper: "ConnectionWrapper"):
+        self._raw_cursor = raw_cursor
+        self._conn_wrapper = conn_wrapper
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        res = self._raw_cursor.execute(*args, **kwargs)
+        self._conn_wrapper._check_changes()
+        return res
+
+    def executemany(self, *args: Any, **kwargs: Any) -> Any:
+        res = self._raw_cursor.executemany(*args, **kwargs)
+        self._conn_wrapper._check_changes()
+        return res
+
+    def executescript(self, *args: Any, **kwargs: Any) -> Any:
+        res = self._raw_cursor.executescript(*args, **kwargs)
+        self._conn_wrapper._check_changes()
+        return res
+
+    def __iter__(self) -> Any:
+        return iter(self._raw_cursor)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._raw_cursor, name)
+
+
+class ConnectionWrapper:
+    """Wrapper around sqlite3.Connection that tracks total_changes and notifies Database on writes."""
+
+    def __init__(self, raw_conn: sqlite3.Connection, db: Optional["Database"] = None):
+        self._raw_conn = raw_conn
+        self._db = db
+        self._initial_changes = raw_conn.total_changes
+
+    def _check_changes(self) -> None:
+        try:
+            current = self._raw_conn.total_changes
+            if current > self._initial_changes:
+                if self._db is not None:
+                    self._db.mark_dirty()
+                self._initial_changes = current
+        except Exception:
+            pass
+
+    def cursor(self, *args: Any, **kwargs: Any) -> CursorWrapper:
+        raw_cur = self._raw_conn.cursor(*args, **kwargs)
+        return CursorWrapper(raw_cur, self)
+
+    def commit(self) -> None:
+        self._raw_conn.commit()
+        self._check_changes()
+
+    def close(self) -> None:
+        self._check_changes()
+        self._raw_conn.close()
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        res = self._raw_conn.execute(*args, **kwargs)
+        self._check_changes()
+        return res
+
+    def executemany(self, *args: Any, **kwargs: Any) -> Any:
+        res = self._raw_conn.executemany(*args, **kwargs)
+        self._check_changes()
+        return res
+
+    def executescript(self, *args: Any, **kwargs: Any) -> Any:
+        res = self._raw_conn.executescript(*args, **kwargs)
+        self._check_changes()
+        return res
+
+    def backup(self, target: Any, *args: Any, **kwargs: Any) -> Any:
+        raw_target = getattr(target, "_raw_conn", target)
+        return self._raw_conn.backup(raw_target, *args, **kwargs)
+
+    def __enter__(self) -> "ConnectionWrapper":
+        self._raw_conn.__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        try:
+            res = self._raw_conn.__exit__(exc_type, exc_val, exc_tb)
+            self._check_changes()
+            return res
+        except Exception:
+            self._check_changes()
+            raise
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._raw_conn, name)
+
+
 class Database:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self._ensure_parent_dir()
+        self.dirty: bool = False
+        self.write_version: int = 0
+        self.on_dirty_callback: Optional[Callable[[], None]] = None
         self.init_db()
+        self.dirty = False
+        self.write_version = 0
+
+    def mark_dirty(self) -> None:
+        """Mark database as modified and notify listener if configured."""
+        self.dirty = True
+        self.write_version += 1
+        if self.on_dirty_callback is not None:
+            try:
+                self.on_dirty_callback()
+            except Exception:
+                pass
+
+    def clear_dirty(self, version: Optional[int] = None) -> None:
+        """Clear dirty flag if version matches current write_version, or unconditionally if version is None."""
+        if version is None or version == self.write_version:
+            self.dirty = False
 
     def _ensure_parent_dir(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def get_connection(self) -> sqlite3.Connection:
-        """Create and return an SQLite connection configured with Row factory and busy timeout."""
+    def get_connection(self) -> ConnectionWrapper:
+        """Create and return an SQLite connection wrapped to detect writes and configured with Row factory."""
         conn = sqlite3.connect(str(self.db_path), timeout=15.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.execute("PRAGMA busy_timeout = 5000;")
-        return conn
+        return ConnectionWrapper(conn, self)
+
+    def backup_to_file(self, target_path: Path | str) -> None:
+        """Create a consistent snapshot of the database using SQLite's online backup API."""
+        target_path = Path(target_path)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.get_connection() as conn:
+            raw_src = getattr(conn, "_raw_conn", conn)
+            dst_conn = sqlite3.connect(str(target_path))
+            try:
+                raw_src.backup(dst_conn)
+            finally:
+                dst_conn.close()
 
     def checkpoint(self) -> None:
         """Execute PRAGMA wal_checkpoint(TRUNCATE) to flush all WAL changes into the database file and truncate WAL/SHM."""
@@ -391,4 +518,6 @@ class Database:
                     )
 
             conn.commit()
+        self.dirty = False
+        self.write_version = 0
 

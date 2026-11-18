@@ -137,6 +137,22 @@ class TodoApp:
             focus_detector=self.focus_detector,
         )
 
+        self._redraw_requested = False
+        if self.sync_service and not self.no_sync:
+            self.db.on_dirty_callback = self._on_db_dirty
+            self.sync_service.start_background_pull(
+                self.db, on_pulled=self._on_remote_pulled
+            )
+
+    def _on_db_dirty(self) -> None:
+        """Schedule debounced push when local database modifications occur."""
+        if self.sync_service and not self.no_sync:
+            self.sync_service.schedule_debounced_push(self.db, delay=3.0)
+
+    def _on_remote_pulled(self) -> None:
+        """Trigger silent redraw of the Today screen after a remote database pull."""
+        self._redraw_requested = True
+
     def run(self) -> None:
         """Run the main interactive application loop inside the alternate terminal screen."""
         try:
@@ -144,9 +160,30 @@ class TodoApp:
                 self._main_loop()
         finally:
             self.telegram_adapter.disconnect()
+            if self.sync_service:
+                self.sync_service.cancel_debounce_timer()
+
+            is_dirty = getattr(self.db, "dirty", False)
             self.db.close()
-            if self.sync_service and not self.no_sync:
-                self.sync_service.push()
+
+            if (
+                is_dirty
+                and self.sync_service
+                and self.sync_service.is_configured
+                and not self.no_sync
+            ):
+                import subprocess
+
+                try:
+                    subprocess.Popen(
+                        [sys.executable, "-m", "todo.cli", "sync", "push"],
+                        start_new_session=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        stdin=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    pass
 
     def _main_loop(self) -> None:
         status_msg: Optional[str] = None
@@ -168,12 +205,14 @@ class TodoApp:
 
                 if (
                     needs_redraw
+                    or self._redraw_requested
                     or today_str != last_rendered_date
                     or mode != last_rendered_mode
                     or cur_size != last_rendered_size
                     or resized
                     or status_msg is not None
                 ):
+                    self._redraw_requested = False
                     tasks = self.daily_service.get_active_tasks_for_date(today_str)
                     completed_cnt, total_cnt, _ = self.daily_service.get_progress_for_date(today_str)
 
@@ -219,11 +258,12 @@ class TodoApp:
                 choice = read_key(timeout=0.2)
                 if choice is None:
                     # Timeout elapsed: no key pressed.
-                    # Redraw only if date changed or terminal resized
+                    # Redraw only if date changed, terminal resized, or background pull finished
                     cur_today = self.daily_service.get_today_str()
                     cur_sz = (console.width, console.height)
                     if (
-                        cur_today != last_rendered_date
+                        self._redraw_requested
+                        or cur_today != last_rendered_date
                         or cur_sz != last_rendered_size
                         or check_and_clear_resized()
                     ):

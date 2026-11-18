@@ -31,10 +31,6 @@ def cli(ctx: click.Context, no_sync: bool) -> None:
 
         if config.dropbox_refresh_token and not no_sync:
             sync_svc = SyncService(config)
-            # Automatic pull on startup before opening local database
-            ok, msg = sync_svc.pull()
-            if not ok and "Offline" not in msg:
-                console.print(f"[yellow]Notice: {msg}[/yellow]")
 
         app = TodoApp(config=config, sync_service=sync_svc, no_sync=no_sync)
         app.run()
