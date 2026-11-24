@@ -188,6 +188,9 @@ class TodoApp:
     def _main_loop(self) -> None:
         status_msg: Optional[str] = None
         status_style: str = "green"
+        if getattr(self.config, "is_first_run", False):
+            status_msg = "Welcome to Extern! Press '+' to add a task, or run 'extern auth dropbox' to link sync."
+            status_style = "bright_cyan"
         selected_idx = 0
         selected_task_id: Optional[int] = None
         selected_task_ids: Set[int] = set()

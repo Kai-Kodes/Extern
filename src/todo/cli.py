@@ -1,10 +1,11 @@
 """Command line interface entrypoint for Extern (Todo CLI)."""
 
 import shutil
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import click
 from rich.table import Table
@@ -41,15 +42,25 @@ def cli(ctx: click.Context, no_sync: bool) -> None:
 # -----------------------------------------------------------------------------
 
 
+def maybe_show_first_run_hint(config: Config) -> None:
+    """Display a welcoming first-run hint on brand-new installs."""
+    if getattr(config, "is_first_run", False):
+        console.print(
+            "[bold bright_cyan]Welcome to Extern![/bold bright_cyan] "
+            "[dim]Get started with 'extern add \"My Task\"' or run 'extern auth dropbox' / 'extern auth telegram'.[/dim]\n"
+        )
+
+
 @cli.command("today")
 def today_cmd() -> None:
     """Print tasks scheduled for today (non-interactive)."""
     config = Config.load()
+    maybe_show_first_run_hint(config)
     db = Database(config.db_path)
     daily_service = DailyService(db)
 
     today_str = datetime.now().date().isoformat()
-    tasks = daily_service.get_tasks_for_date(today_str)
+    tasks = daily_service.get_active_tasks_for_date(today_str)
 
     console.print(f"\n[bold bright_white]{format_today_title()}[/bold bright_white]\n")
 
@@ -426,6 +437,218 @@ def doctor_cmd() -> None:
 def status_alias_cmd(ctx: click.Context) -> None:
     """Alias for 'extern doctor'."""
     ctx.invoke(doctor_cmd)
+
+
+# -----------------------------------------------------------------------------
+# Uninstallation (`extern uninstall`)
+# -----------------------------------------------------------------------------
+
+
+def _detect_and_uninstall_package(skip: bool = False) -> Tuple[str, bool, str]:
+    """Detect package installer (pipx, uv tool, pip) and run uninstaller."""
+    if skip:
+        return "skipped", True, "Package uninstallation skipped"
+
+    prefix = str(sys.prefix).lower()
+    exe = str(sys.executable).lower()
+
+    # 1. pipx
+    if "pipx" in prefix or "pipx" in exe:
+        pipx_bin = shutil.which("pipx")
+        if pipx_bin:
+            try:
+                res = subprocess.run(
+                    [pipx_bin, "uninstall", "extern"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if res.returncode == 0:
+                    return "pipx", True, "Uninstalled 'extern' via pipx"
+                res2 = subprocess.run(
+                    [pipx_bin, "uninstall", "todo-cli"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if res2.returncode == 0:
+                    return "pipx", True, "Uninstalled 'todo-cli' via pipx"
+            except Exception as e:
+                return "pipx", False, str(e)
+
+    # 2. uv tool
+    if "uv/tools" in prefix or "uv/tools" in exe:
+        uv_bin = shutil.which("uv")
+        if uv_bin:
+            try:
+                res = subprocess.run(
+                    [uv_bin, "tool", "uninstall", "extern"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if res.returncode == 0:
+                    return "uv tool", True, "Uninstalled 'extern' via uv tool"
+                res2 = subprocess.run(
+                    [uv_bin, "tool", "uninstall", "todo-cli"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if res2.returncode == 0:
+                    return "uv tool", True, "Uninstalled 'todo-cli' via uv tool"
+            except Exception as e:
+                return "uv tool", False, str(e)
+
+    # 3. pip (standard / editable)
+    try:
+        res = subprocess.run(
+            [sys.executable, "-m", "pip", "uninstall", "-y", "extern", "todo-cli"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if res.returncode == 0:
+            return "pip", True, "Uninstalled package via pip"
+        return "pip", False, res.stderr or res.stdout
+    except Exception as e:
+        return "pip", False, str(e)
+
+
+@cli.command("uninstall")
+@click.option(
+    "-y", "--yes", is_flag=True, help="Confirm uninstallation without prompting."
+)
+@click.option(
+    "--keep-data",
+    is_flag=True,
+    help="Preserve local database and task history (~/.local/share/todo/todo.db).",
+)
+@click.option(
+    "--skip-pkg",
+    is_flag=True,
+    hidden=True,
+    help="Skip package manager removal (for testing).",
+)
+def uninstall_cmd(yes: bool, keep_data: bool, skip_pkg: bool) -> None:
+    """Cleanly uninstall Extern, revoke cloud sessions, and remove data."""
+    if not yes:
+        if not click.confirm(
+            "Are you sure you want to uninstall Extern and remove configuration?",
+            default=False,
+        ):
+            console.print("[dim]Uninstallation aborted.[/dim]")
+            return
+
+    config = Config.load(auto_create=False)
+    data_dir = config.get_data_dir()
+    config_dir = config.get_config_dir()
+    config_file = config.get_config_path()
+    db_path = config.db_path
+
+    console.print("\n[bold bright_white]EXTERN UNINSTALLATION[/bold bright_white]\n")
+
+    # 1. Revoke / clear sessions
+    if config.dropbox_refresh_token:
+        try:
+            import dropbox
+
+            dbx = dropbox.Dropbox(
+                oauth2_refresh_token=config.dropbox_refresh_token,
+                app_key=config.dropbox_app_key,
+                timeout=3.0,
+            )
+            dbx.auth_token_revoke()
+            console.print("  [bold green]✓[/bold green] Revoked Dropbox OAuth refresh token.")
+        except Exception:
+            console.print("  [dim]• Could not revoke Dropbox token remotely (offline or expired).[/dim]")
+
+    # Telegram session
+    session_targets = set()
+    if config.telegram_session_path:
+        session_targets.add(config.telegram_session_path)
+        if not str(config.telegram_session_path).endswith(".session"):
+            session_targets.add(Path(f"{config.telegram_session_path}.session"))
+    session_targets.add(data_dir / "telegram.session")
+
+    for s_file in session_targets:
+        if s_file.exists():
+            try:
+                s_file.unlink()
+                console.print(f"  [bold green]✓[/bold green] Removed Telegram session: {s_file}")
+            except OSError as e:
+                console.print(f"  [yellow]![/yellow] Could not remove Telegram session: {e}")
+        s_journal = s_file.with_name(s_file.name + "-journal")
+        if s_journal.exists():
+            try:
+                s_journal.unlink()
+            except OSError:
+                pass
+
+    # Sync state
+    for sync_state_file in {data_dir / "sync_state.json", db_path.parent / "sync_state.json"}:
+        if sync_state_file.exists():
+            try:
+                sync_state_file.unlink()
+                console.print(f"  [bold green]✓[/bold green] Removed sync state: {sync_state_file}")
+            except OSError:
+                pass
+
+    if config_file.exists():
+        try:
+            config_file.unlink()
+            console.print(f"  [bold green]✓[/bold green] Removed configuration: {config_file}")
+        except OSError as e:
+            console.print(f"  [yellow]![/yellow] Could not remove config file: {e}")
+
+    if config_dir.exists():
+        for tmp in config_dir.glob("*.tmp"):
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        try:
+            if not any(config_dir.iterdir()):
+                config_dir.rmdir()
+                console.print(f"  [bold green]✓[/bold green] Removed empty directory: {config_dir}")
+        except OSError:
+            pass
+
+    # 2. Database files
+    if keep_data:
+        console.print(f"  [bold cyan]•[/bold cyan] Preserved database and task history: {db_path}")
+    else:
+        for p in [db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")]:
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        if data_dir.exists():
+            for p in data_dir.glob("todo.db*"):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        console.print(f"  [bold green]✓[/bold green] Removed database files at: {db_path}")
+
+        if data_dir.exists():
+            try:
+                if not any(data_dir.iterdir()):
+                    data_dir.rmdir()
+                    console.print(f"  [bold green]✓[/bold green] Removed empty directory: {data_dir}")
+            except OSError:
+                pass
+
+    # 3. Package uninstallation
+    method, ok, msg = _detect_and_uninstall_package(skip=skip_pkg)
+    if method != "skipped":
+        if ok:
+            console.print(f"  [bold green]✓[/bold green] {msg}")
+        else:
+            console.print(f"  [yellow]![/yellow] Package manager ({method}) notice: {msg}")
+
+    console.print("\n[bold green]Extern has been cleanly uninstalled.[/bold green]\n")
 
 
 def main() -> None:

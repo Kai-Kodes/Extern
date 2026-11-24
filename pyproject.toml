@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "todo-cli"
-version = "0.2.0"
+name = "extern"
+version = "0.2.2"
 description = "A standalone, self-contained Todo CLI application with native Dropbox sync, Telegram courses, and media chunking"
 readme = "README.md"
 requires-python = ">=3.11"

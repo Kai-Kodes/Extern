@@ -23,22 +23,25 @@ Built with Python, Click, Rich, SQLite, Telethon, and the Dropbox SDK. Designed 
 
 ## Quick Installation
 
-Install directly with `pipx` (recommended) or `pip`:
+Install directly with `pipx` (recommended), `uv tool`, or `pip`:
 
 ```bash
-# Recommended: Isolated global CLI installation
+# Recommended: Isolated global CLI installation with pipx
 pipx install git+https://github.com/Kai-Kodes/Extern.git
 
-# Or with pip
+# Fast global installation with uv
+uv tool install git+https://github.com/Kai-Kodes/Extern.git
+
+# Or with standard pip
 pip install git+https://github.com/Kai-Kodes/Extern.git
 ```
 
-To install from a local clone:
+To install in editable development mode from a local clone:
 
 ```bash
 git clone https://github.com/Kai-Kodes/Extern.git
 cd Extern
-pip install .
+pip install -e .
 ```
 
 Both `extern` and `todo` commands will be available in your `PATH`.
@@ -54,6 +57,44 @@ pkg update && pkg install -y python git
 # 2. Install Extern directly
 pip install git+https://github.com/Kai-Kodes/Extern.git
 ```
+
+---
+
+## Quickstart Workflow
+
+Get up and running in seconds:
+
+1. **Launch Extern immediately**:
+   ```bash
+   extern
+   # or alias
+   todo
+   ```
+   *Zero manual setup required! On first run, Extern automatically initializes your local SQLite database at `~/.local/share/todo/todo.db` and config at `~/.config/todo/config.toml`.*
+
+2. **Connect Cross-Device Cloud Sync**:
+   ```bash
+   extern auth dropbox
+   ```
+   *Connects your personal Dropbox via PKCE OAuth. Your data is isolated in your own Dropbox account under `/Apps/Extern/todo.db`.*
+
+3. **Connect Telegram Courses**:
+   ```bash
+   extern auth telegram
+   ```
+   *Browse and track video lesson channels directly in your terminal.*
+
+4. **Run System Diagnostics**:
+   ```bash
+   extern doctor
+   ```
+   *Verify database, scanner, audio, and sync engine health.*
+
+5. **Clean Uninstallation**:
+   ```bash
+   extern uninstall
+   ```
+   *Cleanly revokes active cloud sessions, removes configurations and local database files, and uninstalls the package.*
 
 ---
 
@@ -198,6 +239,21 @@ EXTERN SYSTEM DIAGNOSTICS
   YouTube (yt-dlp)    OK             yt-dlp version 2025.04.30
   Telegram            Authenticated  Session: ~/.local/share/todo/telegram.session
   Dropbox Sync        Linked         Online, rev 0123456789abcdef -> /todo.db
+```
+
+### Clean Uninstallation
+
+Cleanly remove Extern, revoke cloud tokens, and remove data:
+
+```bash
+# Interactive uninstallation (prompts for confirmation)
+extern uninstall
+
+# Non-interactive clean uninstall
+extern uninstall --yes
+
+# Uninstall package and config while preserving local database and task history
+extern uninstall --yes --keep-data
 ```
 
 ---

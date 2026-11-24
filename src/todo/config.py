@@ -49,16 +49,20 @@ class Config:
     dropbox_access_token: Optional[str] = None
     dropbox_path: str = DEFAULT_DROPBOX_PATH
     dropbox_sync_enabled: bool = True
+    is_first_run: bool = False
 
     @classmethod
     def get_config_dir(cls) -> Path:
         """Resolve the active configuration directory (~/.config/todo)."""
         xdg_config = os.environ.get("XDG_CONFIG_HOME")
-        return (
-            Path(xdg_config) / "todo"
-            if xdg_config
-            else Path.home() / ".config" / "todo"
-        )
+        if xdg_config:
+            return Path(xdg_config) / "todo"
+        try:
+            import platformdirs
+
+            return Path(platformdirs.user_config_dir("todo", appauthor=False))
+        except Exception:
+            return Path.home() / ".config" / "todo"
 
     @classmethod
     def get_config_path(cls) -> Path:
@@ -72,17 +76,50 @@ class Config:
     def get_data_dir(cls) -> Path:
         """Resolve the active data directory (~/.local/share/todo)."""
         xdg_data = os.environ.get("XDG_DATA_HOME")
-        return (
-            Path(xdg_data) / "todo"
-            if xdg_data
-            else Path.home() / ".local" / "share" / "todo"
-        )
+        if xdg_data:
+            return Path(xdg_data) / "todo"
+        try:
+            import platformdirs
+
+            return Path(platformdirs.user_data_dir("todo", appauthor=False))
+        except Exception:
+            return Path.home() / ".local" / "share" / "todo"
 
     @classmethod
-    def load(cls) -> "Config":
+    def create_default_config(cls, path: Optional[Path] = None) -> Path:
+        """Create default config.toml file."""
+        cfg_path = path or cls.get_config_path()
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        default_data = {
+            "general": {},
+            "dropbox": {
+                "app_key": DEFAULT_DROPBOX_APP_KEY,
+                "path": DEFAULT_DROPBOX_PATH,
+                "enabled": True,
+            },
+            "filemeta": {
+                "command": "filemeta",
+                "timeout": 60,
+                "device_timeout": 300,
+            },
+        }
+        cls._write_raw_toml(default_data, path=cfg_path)
+        return cfg_path
+
+    @classmethod
+    def load(cls, auto_create: bool = True) -> "Config":
         """Load configuration from config.toml, environment variables, or defaults."""
         config_file = cls.get_config_path()
         data_dir = cls.get_data_dir()
+        default_db_path = data_dir / "todo.db"
+
+        is_first_run = False
+        if not config_file.exists() and auto_create:
+            is_first_run = True
+            try:
+                cls.create_default_config(config_file)
+            except Exception:
+                pass
         default_db_path = data_dir / "todo.db"
 
         # Database path
@@ -191,7 +228,7 @@ class Config:
             default_session = data_dir / "telegram.session"
             telegram_session_path = default_session
 
-        return cls(
+        cfg = cls(
             db_path=db_path,
             filemeta_command=filemeta_command,
             filemeta_timeout=filemeta_timeout,
@@ -207,12 +244,18 @@ class Config:
             dropbox_access_token=dropbox_access_token,
             dropbox_path=dropbox_path,
             dropbox_sync_enabled=dropbox_sync_enabled,
+            is_first_run=is_first_run,
         )
+        try:
+            cfg.ensure_directories()
+        except Exception:
+            pass
+        return cfg
 
     @classmethod
-    def _read_raw_toml(cls) -> Dict[str, Dict[str, Any]]:
+    def _read_raw_toml(cls, path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
         """Read existing config.toml into a nested dict, or return empty dict."""
-        cfg_path = cls.get_config_path()
+        cfg_path = path or cls.get_config_path()
         if not cfg_path.exists():
             return {}
         try:
@@ -222,9 +265,11 @@ class Config:
             return {}
 
     @classmethod
-    def _write_raw_toml(cls, data: Dict[str, Dict[str, Any]]) -> None:
+    def _write_raw_toml(
+        cls, data: Dict[str, Dict[str, Any]], path: Optional[Path] = None
+    ) -> None:
         """Atomically write dictionary to config.toml."""
-        cfg_path = cls.get_config_path()
+        cfg_path = path or cls.get_config_path()
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         content = _serialize_toml(data)
         tmp_path = cfg_path.with_suffix(".tmp")
